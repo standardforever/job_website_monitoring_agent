@@ -1,0 +1,71 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
+from utils.logging import get_logger, log_event
+
+logger = get_logger("config")
+
+
+def load_environment() -> None:
+    """Load env files from both repo root and source/ for local API runs."""
+    source_env = Path(__file__).resolve().parents[1] / ".env"
+    repo_env = Path(__file__).resolve().parents[2] / ".env"
+    for env_path in (repo_env, source_env):
+        if env_path.exists():
+            load_dotenv(env_path, override=False)
+            log_event(
+                logger,
+                "info",
+                "environment_loaded env_path=%s",
+                str(env_path),
+                domain="config",
+                env_path=str(env_path),
+            )
+
+
+load_environment()
+
+
+@dataclass(slots=True)
+class Settings:
+    selenium_remote_url: str = os.getenv("SELENIUM_REMOTE_URL", "http://127.0.0.1:4445/wd/hub")
+    client_registration_password: str = os.getenv("CLIENT_REGISTRATION_PASSWORD", "")
+    default_agent_count: int = int(os.getenv("DEFAULT_AGENT_COUNT", "1"))
+    post_navigation_delay_ms: int = int(os.getenv("POST_NAVIGATION_DELAY_MS", "5000"))
+    mongodb_uri: str = os.getenv("MONGODB_URI", "mongodb://admin:secret@127.0.0.1:27017")
+    mongodb_database: str = os.getenv("MONGODB_DATABASE", "job_monitoring_agent")
+    mongodb_clients_collection: str = os.getenv("MONGODB_CLIENTS_COLLECTION", "clients")
+    mongodb_client_domains_collection: str = os.getenv("MONGODB_CLIENT_DOMAINS_COLLECTION", "client_domains")
+    mongodb_domains_collection: str = os.getenv("MONGODB_DOMAINS_COLLECTION", "domains")
+    mongodb_process_runs_collection: str = os.getenv("MONGODB_PROCESS_RUNS_COLLECTION", "process_runs")
+    mongodb_process_run_items_collection: str = os.getenv("MONGODB_PROCESS_RUN_ITEMS_COLLECTION", "process_run_items")
+    mongodb_domain_checks_collection: str = os.getenv("MONGODB_DOMAIN_CHECKS_COLLECTION", "domain_checks")
+    mongodb_jobs_collection: str = os.getenv("MONGODB_JOBS_COLLECTION", "jobs")
+    mongodb_client_jobs_collection: str = os.getenv("MONGODB_CLIENT_JOBS_COLLECTION", "client_jobs")
+    mongodb_job_extraction_cache_collection: str = os.getenv("MONGODB_JOB_EXTRACTION_CACHE_COLLECTION", "job_extraction_cache")
+    mongodb_domain_job_snapshots_collection: str = os.getenv("MONGODB_DOMAIN_JOB_SNAPSHOTS_COLLECTION", "domain_job_snapshots")
+    process_email_enabled: bool = os.getenv("PROCESS_EMAIL_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    resend_api_key: str = os.getenv("RESEND_API_KEY", "")
+    email_from_address: str = os.getenv("EMAIL_FROM_ADDRESS", "")
+    email_from_name: str = os.getenv("EMAIL_FROM_NAME", "Job Monitoring Agent")
+    email_reply_to: str = os.getenv("EMAIL_REPLY_TO", "")
+    process_email_subject_prefix: str = os.getenv("PROCESS_EMAIL_SUBJECT_PREFIX", "")
+
+
+def get_settings() -> Settings:
+    settings = Settings()
+    log_event(
+        logger,
+        "info",
+        "settings_loaded mongodb_database=%s process_runs_collection=%s",
+        settings.mongodb_database,
+        settings.mongodb_process_runs_collection,
+        domain="config",
+        mongodb_database=settings.mongodb_database,
+        mongodb_process_runs_collection=settings.mongodb_process_runs_collection,
+    )
+    return settings
