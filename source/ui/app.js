@@ -4,7 +4,6 @@ const state = {
   activeClientName: sessionStorage.getItem("activeClientName") || "",
   processesPage: 1,
   pageSize: 10,
-  processesTimer: null,
   editingClientName: "",
 };
 
@@ -168,9 +167,7 @@ async function submitClientForm(event) {
     return;
   }
 
-  const path = isEdit
-    ? `/clients/${encodeURIComponent(state.editingClientName)}/config`
-    : "/clients";
+  const path = isEdit ? `/clients/${encodeURIComponent(state.editingClientName)}/config` : "/clients";
   const method = isEdit ? "PATCH" : "POST";
 
   const response = await apiFetch(path, {
@@ -189,8 +186,7 @@ async function submitClientForm(event) {
 
 async function unlockAdmin(event) {
   event.preventDefault();
-  const password = byId("admin-password").value;
-  setAdminPassword(password);
+  setAdminPassword(byId("admin-password").value);
   try {
     await loadClients();
   } catch (error) {
@@ -232,9 +228,7 @@ function renderProcesses(payload) {
   list.innerHTML = processes
     .map((process) => {
       const summary = process.summary || {};
-      const metadata = process.metadata || {};
       const processId = encodeURIComponent(process.process_id);
-      const showJobDownloads = Boolean(metadata.job_extract || metadata.requested_capability?.includes("job"));
       const rerunButton = !["queued", "running", "stop_requested"].includes(process.status)
         ? `<button class="button button-secondary rerun-process-button" type="button" data-process-id="${escapeHtml(process.process_id)}">Rerun</button>`
         : "";
@@ -253,18 +247,16 @@ function renderProcesses(payload) {
             <span class="status-pill ${escapeHtml(process.status)}">${escapeHtml(process.status)}</span>
           </div>
           <div class="summary-grid">
-            <div class="summary-item"><span>Total URLs</span><strong>${escapeHtml(summary.total_urls ?? 0)}</strong></div>
-            <div class="summary-item"><span>Processed</span><strong>${escapeHtml(summary.processed_url_count ?? 0)}</strong></div>
+            <div class="summary-item"><span>Domains</span><strong>${escapeHtml(summary.total_domain_count ?? 0)}</strong></div>
+            <div class="summary-item"><span>Processed</span><strong>${escapeHtml(summary.processed_domain_count ?? 0)}</strong></div>
             <div class="summary-item"><span>Completed</span><strong>${escapeHtml(summary.completed_domain_count ?? 0)}</strong></div>
             <div class="summary-item"><span>Failed</span><strong>${escapeHtml(summary.failed_domain_count ?? 0)}</strong></div>
-            <div class="summary-item"><span>Running</span><strong>${escapeHtml(summary.running_url_count ?? 0)}</strong></div>
-            <div class="summary-item"><span>Stopped</span><strong>${escapeHtml(summary.stopped_url_count ?? 0)}</strong></div>
+            <div class="summary-item"><span>Jobs</span><strong>${escapeHtml(summary.job_count ?? 0)}</strong></div>
+            <div class="summary-item"><span>New Jobs</span><strong>${escapeHtml(summary.new_job_count ?? 0)}</strong></div>
           </div>
-          <p class="muted">Capability: ${escapeHtml(metadata.requested_capability || "career_page")} | ATS: ${escapeHtml(metadata.ats_check)} | Jobs: ${escapeHtml(metadata.job_extract)}</p>
           <div class="process-actions">
-            <a class="button button-secondary" href="${buildApiUrl(`processes/${processId}/important`)}" download>Career/ATS JSON</a>
-            <a class="button button-secondary" href="${buildApiUrl(`processes/${processId}/csv-bundle.zip`)}" download>Career/ATS CSV</a>
-            ${showJobDownloads ? `<a class="button button-secondary" href="${buildApiUrl(`processes/${processId}/jobs.json`)}" download>Jobs JSON</a>` : ""}
+            <a class="button button-secondary" href="${buildApiUrl(`processes/${processId}`)}" download>JSON</a>
+            <a class="button button-secondary" href="${buildApiUrl(`processes/${processId}/csv-bundle.zip`)}" download>CSV Bundle</a>
             ${rerunButton}
             ${stopButton}
           </div>
@@ -277,9 +269,7 @@ function renderProcesses(payload) {
     button.addEventListener("click", async () => {
       button.disabled = true;
       try {
-        const response = await apiFetch(`/processes/${encodeURIComponent(button.dataset.processId)}/stop`, {
-          method: "POST",
-        });
+        const response = await apiFetch(`/processes/${encodeURIComponent(button.dataset.processId)}/stop`, { method: "POST" });
         showAlert(response.message || "Stop requested.", "info");
         await loadProcesses();
       } catch (error) {
@@ -293,9 +283,7 @@ function renderProcesses(payload) {
     button.addEventListener("click", async () => {
       button.disabled = true;
       try {
-        const response = await apiFetch(`/processes/${encodeURIComponent(button.dataset.processId)}/rerun`, {
-          method: "POST",
-        });
+        const response = await apiFetch(`/processes/${encodeURIComponent(button.dataset.processId)}/rerun`, { method: "POST" });
         showAlert(`Rerun started: ${response.process_id}`, "success");
         await loadProcesses();
       } catch (error) {
@@ -304,7 +292,6 @@ function renderProcesses(payload) {
       }
     });
   }
-
 }
 
 async function loadProcesses() {
@@ -316,17 +303,6 @@ async function loadProcesses() {
   renderProcesses(payload);
 }
 
-function startProcessesRefresh() {
-  if (state.processesTimer) {
-    window.clearInterval(state.processesTimer);
-  }
-  // state.processesTimer = window.setInterval(() => {
-  //   if (!byId("client-dashboard").classList.contains("hidden")) {
-  //     loadProcesses().catch((error) => showAlert(error.message, "error"));
-  //   }
-  // }, 15000);
-}
-
 async function openClientDashboard(event) {
   event.preventDefault();
   const clientName = byId("dashboard-client-name").value.trim();
@@ -334,7 +310,6 @@ async function openClientDashboard(event) {
     showAlert("Enter a client name first.", "error");
     return;
   }
-
   const client = await apiFetch(`/clients/${encodeURIComponent(clientName)}/config`);
   setActiveClient(client.client_name || clientName);
   byId("active-client-name").textContent = `${state.activeClientName} Dashboard`;
@@ -342,7 +317,6 @@ async function openClientDashboard(event) {
   byId("client-entry-card").classList.add("hidden");
   byId("client-dashboard").classList.remove("hidden");
   await loadProcesses();
-  startProcessesRefresh();
   showAlert("Client dashboard ready.", "success");
 }
 
@@ -358,23 +332,17 @@ async function submitManualProcess(event) {
   event.preventDefault();
   const urls = collectManualUrls();
   if (!urls.length) {
-    showAlert("Add at least one URL before starting a process.", "error");
+    showAlert("Add at least one domain before starting a process.", "error");
     return;
   }
-
-  const payload = {
-    client_name: state.activeClientName,
-    urls,
-    agent_count: Number(byId("manual-agent-count").value || 1),
-    ats_check: byId("manual-ats-check").checked,
-    job_extract: byId("manual-job-extract").checked,
-    job_monitoring: byId("manual-job-monitoring").checked,
-  };
-
   const response = await apiFetch("/processes", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      client_name: state.activeClientName,
+      urls,
+      agent_count: Number(byId("manual-agent-count").value || 1),
+    }),
   });
   showAlert(`Process ${response.process_id} started.`, "success");
   byId("manual-urls").value = "";
@@ -392,9 +360,6 @@ async function submitUploadProcess(event) {
   formData.append("file", fileInput.files[0]);
   formData.append("client_name", state.activeClientName);
   formData.append("agent_count", String(Number(byId("upload-agent-count").value || 1)));
-  formData.append("ats_check", String(byId("upload-ats-check").checked));
-  formData.append("job_extract", String(byId("upload-job-extract").checked));
-  formData.append("job_monitoring", String(byId("upload-job-monitoring").checked));
 
   const response = await apiFetch("/processes/upload", {
     method: "POST",
@@ -425,10 +390,6 @@ function bindEvents() {
   byId("change-client").addEventListener("click", () => {
     byId("client-dashboard").classList.add("hidden");
     byId("client-entry-card").classList.remove("hidden");
-    if (state.processesTimer) {
-      window.clearInterval(state.processesTimer);
-      state.processesTimer = null;
-    }
   });
   byId("manual-process-form").addEventListener("submit", (event) => {
     submitManualProcess(event).catch((error) => showAlert(error.message, "error"));

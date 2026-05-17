@@ -262,7 +262,9 @@ async def create_session_async(
     *,
     reuse_existing: bool = False,
     preferred_session_id: str | None = None,
+    timeout_seconds: int | float | None = None,
 ) -> SessionBootstrapResult | None:
+    timeout = float(timeout_seconds or os.getenv("BROWSER_SESSION_ACQUIRE_TIMEOUT_SECONDS", "600"))
     try:
         return await asyncio.wait_for(
             asyncio.to_thread(
@@ -271,16 +273,18 @@ async def create_session_async(
                 reuse_existing=reuse_existing,
                 preferred_session_id=preferred_session_id,
             ),
-            timeout=45,
+            timeout=max(30.0, timeout),
         )
     except asyncio.TimeoutError:
         log_event(
             logger,
             "error",
-            "grid_session_timeout grid_url=%s",
+            "grid_session_timeout grid_url=%s timeout_seconds=%s",
             grid_url,
+            timeout,
             domain=grid_url or "grid",
             grid_url=grid_url,
+            timeout_seconds=timeout,
         )
         return None
 

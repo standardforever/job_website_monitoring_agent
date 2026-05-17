@@ -1,11 +1,11 @@
 import json
-import os
 import re
 from typing import Any, Dict, Optional
 
 from bs4 import BeautifulSoup, Comment
 from openai import OpenAI
 
+from services.openai_service import resolve_openai_api_key, resolve_openai_model
 from utils.logging import get_logger, log_event
 
 try:
@@ -327,7 +327,8 @@ def generate_pattern_with_llm(
         html_length=len(html),
         example_job_count=len(example_jobs or []),
     )
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    model = resolve_openai_model(model)
+    client = OpenAI(api_key=resolve_openai_api_key())
     cleaned_html = prepared_html or prepare_html_for_llm(html, model=model)
     example_jobs_text = json.dumps(example_jobs or [], indent=2)
 
@@ -397,7 +398,8 @@ def correct_pattern_with_llm(
         problems=validation.get("problems"),
         example_job_count=len(example_jobs or []),
     )
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    model = resolve_openai_model(model)
+    client = OpenAI(api_key=resolve_openai_api_key())
     cleaned_html = prepared_html or prepare_html_for_llm(html, model=model)
     example_jobs_text = json.dumps(example_jobs or [], indent=2)
 
@@ -477,7 +479,8 @@ def final_review_pattern_with_llm(
         problems=validation.get("problems"),
         example_job_count=len(example_jobs or []),
     )
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    model = resolve_openai_model(model)
+    client = OpenAI(api_key=resolve_openai_api_key())
     cleaned_html = prepared_html or prepare_html_for_llm(html, model=model)
     example_jobs_text = json.dumps(example_jobs or [], indent=2)
 

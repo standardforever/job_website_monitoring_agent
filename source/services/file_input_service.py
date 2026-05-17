@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from dataclasses import dataclass
 from io import BytesIO, StringIO
 from pathlib import Path
 
@@ -11,13 +12,19 @@ from utils.logging import get_logger, log_event
 logger = get_logger("file_input_service")
 
 
+@dataclass(slots=True)
+class UploadDomainInput:
+    domain: str
+    career_page_url: str | None = None
+
+
 class FileInputService:
-    def extract_domains(self, filename: str, content: bytes) -> list[str]:
+    def extract_domain_inputs(self, filename: str, content: bytes) -> list[UploadDomainInput]:
         suffix = Path(filename).suffix.lower()
         log_event(
             logger,
             "info",
-            "file_domain_extraction_started filename=%s suffix=%s",
+            "file_domain_input_extraction_started filename=%s suffix=%s",
             filename,
             suffix,
             domain=filename,
@@ -26,33 +33,39 @@ class FileInputService:
         )
 
         if suffix == ".csv":
-            domains = self._extract_domains_from_csv(content)
+            inputs = self._extract_domain_inputs_from_csv(content)
         elif suffix == ".xlsx":
-            domains = self._extract_domains_from_xlsx(content)
+            inputs = self._extract_domain_inputs_from_xlsx(content)
         else:
             raise ValueError("Only .csv and .xlsx files are supported")
 
-        if not domains:
+        if not inputs:
             raise ValueError("No valid values found in the 'domain' column")
 
+        supplied_career_page_count = sum(1 for item in inputs if item.career_page_url)
         log_event(
             logger,
             "info",
-            "file_domain_extraction_completed filename=%s domain_count=%s",
+            "file_domain_input_extraction_completed filename=%s domain_count=%s supplied_career_page_count=%s",
             filename,
-            len(domains),
-            domain=domains[0],
+            len(inputs),
+            supplied_career_page_count,
+            domain=inputs[0].domain,
             upload_filename=filename,
-            domain_count=len(domains),
+            domain_count=len(inputs),
+            supplied_career_page_count=supplied_career_page_count,
         )
-        return domains
+        return inputs
 
-    def _extract_domains_from_csv(self, content: bytes) -> list[str]:
+    def extract_domains(self, filename: str, content: bytes) -> list[str]:
+        return [item.domain for item in self.extract_domain_inputs(filename, content)]
+
+    def _extract_domain_inputs_from_csv(self, content: bytes) -> list[UploadDomainInput]:
         text_stream = StringIO(content.decode("utf-8-sig"))
         reader = csv.DictReader(text_stream)
-        return self._collect_domain_column(reader)
+        return self._collect_domain_inputs(reader)
 
-    def _extract_domains_from_xlsx(self, content: bytes) -> list[str]:
+    def _extract_domain_inputs_from_xlsx(self, content: bytes) -> list[UploadDomainInput]:
         workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)
         try:
             sheet = workbook.active
@@ -69,19 +82,26 @@ class FileInputService:
             raise ValueError("Uploaded file must contain a 'domain' column")
 
         domain_index = normalized_headers.index("domain")
-        domains: list[str] = []
+        career_page_index = normalized_headers.index("career_page_url") if "career_page_url" in normalized_headers else None
+        inputs: list[UploadDomainInput] = []
         seen: set[str] = set()
         for row in rows[1:]:
             if row is None or domain_index >= len(row):
                 continue
-            value = str(row[domain_index] or "").strip()
-            if not value or value in seen:
+            domain = str(row[domain_index] or "").strip()
+            career_page_url = (
+                str(row[career_page_index] or "").strip()
+                if career_page_index is not None and career_page_index < len(row)
+                else ""
+            )
+            marker = f"{domain}|{career_page_url}"
+            if not domain or marker in seen:
                 continue
-            seen.add(value)
-            domains.append(value)
-        return domains
+            seen.add(marker)
+            inputs.append(UploadDomainInput(domain=domain, career_page_url=career_page_url or None))
+        return inputs
 
-    def _collect_domain_column(self, reader: csv.DictReader) -> list[str]:
+    def _collect_domain_inputs(self, reader: csv.DictReader) -> list[UploadDomainInput]:
         if reader.fieldnames is None:
             return []
 
@@ -90,12 +110,15 @@ class FileInputService:
             raise ValueError("Uploaded file must contain a 'domain' column")
 
         domain_key = normalized_fieldnames["domain"]
-        domains: list[str] = []
+        career_page_key = normalized_fieldnames.get("career_page_url")
+        inputs: list[UploadDomainInput] = []
         seen: set[str] = set()
         for row in reader:
-            value = str((row or {}).get(domain_key) or "").strip()
-            if not value or value in seen:
+            domain = str((row or {}).get(domain_key) or "").strip()
+            career_page_url = str((row or {}).get(career_page_key) or "").strip() if career_page_key else ""
+            marker = f"{domain}|{career_page_url}"
+            if not domain or marker in seen:
                 continue
-            seen.add(value)
-            domains.append(value)
-        return domains
+            seen.add(marker)
+            inputs.append(UploadDomainInput(domain=domain, career_page_url=career_page_url or None))
+        return inputs

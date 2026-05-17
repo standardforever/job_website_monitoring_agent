@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from schemas.agent_state import JobScraperState
-
 from services.grid_session import attach_playwright_to_cdp
 from services.tab_manager import ensure_agent_tab
 from utils.logging import get_logger, log_event

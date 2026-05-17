@@ -2,6 +2,7 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app/source
 
 WORKDIR /app
 
@@ -18,4 +19,4 @@ COPY . .
 
 EXPOSE 8110
 
-CMD ["uvicorn", "app:app", "--app-dir", "source", "--host", "0.0.0.0", "--port", "8110", "--reload"]
+CMD ["uvicorn", "app:app", "--app-dir", "source", "--host", "0.0.0.0", "--port", "8110"]
