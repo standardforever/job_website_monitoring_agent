@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from core.config import get_settings
 from services.mongodb_service import MongoDBService
 from services.openai_service import mask_api_key, validate_openai_api_key
 
@@ -11,7 +10,6 @@ from services.openai_service import mask_api_key, validate_openai_api_key
 class ClientService:
     def __init__(self, mongodb_service: MongoDBService) -> None:
         self._mongodb_service = mongodb_service
-        self._settings = get_settings()
 
     async def register(
         self,
@@ -31,7 +29,7 @@ class ClientService:
             email=normalize_email(email),
             api_key=api_key,
             model=model,
-            grid_url=grid_url or self._settings.selenium_remote_url,
+            grid_url=normalize_grid_url(grid_url),
             api_key_status="active",
             api_key_validation_error=None,
         )
@@ -65,7 +63,7 @@ class ClientService:
             email=normalize_email(email) if email is not None else current_client.get("email"),
             api_key=final_api_key,
             model=final_model,
-            grid_url=grid_url if grid_url is not None else current_client.get("grid_url") or self._settings.selenium_remote_url,
+            grid_url=normalize_grid_url(grid_url) if grid_url is not None else current_client.get("grid_url"),
             api_key_status="active",
             api_key_validation_error=None,
         )
@@ -94,6 +92,11 @@ def build_client_key(client_name: str) -> str:
 
 def normalize_email(email: str | None) -> str | None:
     normalized = str(email or "").strip()
+    return normalized or None
+
+
+def normalize_grid_url(grid_url: str | None) -> str | None:
+    normalized = str(grid_url or "").strip()
     return normalized or None
 
 

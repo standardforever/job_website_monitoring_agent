@@ -24,4 +24,10 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     broker_connection_timeout=10,
     broker_connection_retry_on_startup=True,
+    broker_transport_options={
+        "visibility_timeout": settings.celery_visibility_timeout_seconds,
+    },
+    result_backend_transport_options={
+        "visibility_timeout": settings.celery_visibility_timeout_seconds,
+    },
 )

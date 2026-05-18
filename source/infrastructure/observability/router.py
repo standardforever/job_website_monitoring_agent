@@ -10,6 +10,7 @@ from infrastructure.observability.collector import ObservabilityCollector
 
 router = APIRouter(prefix="/observability", tags=["observability"])
 settings = get_settings()
+collector = ObservabilityCollector(settings)
 
 
 def _validate_observability_access(x_registration_password: str | None) -> None:
@@ -21,13 +22,13 @@ def _validate_observability_access(x_registration_password: str | None) -> None:
 @router.get("/summary")
 async def observability_summary(x_registration_password: str | None = Header(default=None)) -> dict[str, Any]:
     _validate_observability_access(x_registration_password)
-    return ObservabilityCollector(settings).snapshot()
+    return collector.snapshot()
 
 
 @router.get("/alerts")
 async def observability_alerts(x_registration_password: str | None = Header(default=None)) -> dict[str, Any]:
     _validate_observability_access(x_registration_password)
-    snapshot = ObservabilityCollector(settings).snapshot()
+    snapshot = collector.snapshot()
     return {
         "collected_at": snapshot["collected_at"],
         "alert_count": len(snapshot["alerts"]),
@@ -39,6 +40,6 @@ async def observability_alerts(x_registration_password: str | None = Header(defa
 async def observability_metrics(x_registration_password: str | None = Header(default=None)) -> PlainTextResponse:
     _validate_observability_access(x_registration_password)
     return PlainTextResponse(
-        ObservabilityCollector(settings).prometheus_metrics(),
+        collector.prometheus_metrics(),
         media_type="text/plain; version=0.0.4",
     )

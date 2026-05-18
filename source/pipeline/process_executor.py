@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from browser.session_manager import BrowserSessionManager
-from core.config import get_settings
+from core.config import Settings, get_settings
 from pipeline.agent_worker import AgentWorker
 from pipeline.domain_processor import DomainProcessor
 from pipeline.exceptions import BrowserCapacityUnavailable
@@ -43,7 +44,16 @@ class ProcessExecutor:
             if current_process is None:
                 raise ValueError(f"Unknown process_id: {process_id}")
             status = str(current_process.get("status") or "").strip().lower()
-            if status in {"acquiring_browser", "running", "completed", "partial_completed", "failed", "stopped", "stop_requested"}:
+            if status in {
+                "acquiring_browser",
+                "recovering",
+                "running",
+                "completed",
+                "partial_completed",
+                "failed",
+                "stopped",
+                "stop_requested",
+            }:
                 return {
                     "process_id": process_id,
                     "status": status,
@@ -144,8 +154,45 @@ class ProcessExecutor:
         )
 
     def _grid_url(self, client: dict[str, Any] | None, process: dict[str, Any]) -> str | None:
+        settings = get_settings()
         metadata = dict(process.get("metadata") or {})
-        return (client or {}).get("grid_url") or metadata.get("client_grid_url")
+        candidate = (client or {}).get("grid_url") or metadata.get("client_grid_url")
+        return self._resolve_grid_url(candidate, settings)
+
+    def _resolve_grid_url(self, candidate: str | None, settings: Settings) -> str | None:
+        configured_url = str(settings.selenium_remote_url or "").strip()
+        raw_candidate = str(candidate or "").strip()
+        if not raw_candidate:
+            return configured_url or None
+        if self._is_container_localhost_grid(raw_candidate, configured_url):
+            log_event(
+                logger,
+                "warning",
+                "process_grid_url_overridden stale_grid_url=%s configured_grid_url=%s",
+                raw_candidate,
+                configured_url,
+                domain=raw_candidate,
+                stale_grid_url=raw_candidate,
+                configured_grid_url=configured_url,
+            )
+            return configured_url or raw_candidate
+        return raw_candidate
+
+    def _is_container_localhost_grid(self, candidate: str, configured_url: str) -> bool:
+        candidate_host = self._url_host(candidate)
+        configured_host = self._url_host(configured_url)
+        if candidate_host not in {"localhost", "127.0.0.1", "0.0.0.0"}:
+            return False
+        if configured_host in {"", "localhost", "127.0.0.1", "0.0.0.0"}:
+            return False
+        return True
+
+    def _url_host(self, url: str) -> str:
+        normalized = url if url.startswith(("http://", "https://")) else f"http://{url}"
+        try:
+            return str(urlparse(normalized).hostname or "").strip().lower()
+        except Exception:
+            return ""
 
     def _domains_and_assignments(self, process: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         domains = list(process.get("domains") or [])

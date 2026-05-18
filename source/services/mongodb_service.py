@@ -366,7 +366,7 @@ class MongoDBService:
     def _heartbeat_process_sync(self, process_id: str, state: str) -> None:
         now = datetime.utcnow()
         self._get_collection("process_uploads").update_one(
-            {"process_id": process_id, "status": {"$in": ["acquiring_browser", "running", "stop_requested"]}},
+            {"process_id": process_id, "status": {"$in": ["acquiring_browser", "recovering", "running", "stop_requested"]}},
             {
                 "$set": {
                     "updated_at": now,
@@ -508,7 +508,7 @@ class MongoDBService:
     def _mark_process_stop_requested_sync(self, process_id: str) -> dict[str, Any] | None:
         now = datetime.utcnow()
         self._get_collection("process_uploads").update_one(
-            {"process_id": process_id, "status": {"$in": ["queued", "acquiring_browser", "running", "stop_requested"]}},
+            {"process_id": process_id, "status": {"$in": ["queued", "acquiring_browser", "recovering", "running", "stop_requested"]}},
             {"$set": {"status": "stop_requested", "updated_at": now}},
         )
         return self._get_process_upload_sync(process_id)
@@ -519,23 +519,37 @@ class MongoDBService:
     def _recover_interrupted_processes_sync(self, stale_after_seconds: int) -> list[dict[str, Any]]:
         now = datetime.utcnow()
         stale_before = now - timedelta(seconds=max(1, int(stale_after_seconds)))
-        interrupted = list(
+        candidates = list(
             self._get_collection("process_uploads").find(
                 {
-                    "status": {"$in": ["acquiring_browser", "running", "stop_requested"]},
+                    "status": {"$in": ["acquiring_browser", "running", "stop_requested", "recovering"]},
                     "updated_at": {"$lte": stale_before},
                 },
                 {"_id": 0},
             )
         )
         recovered: list[dict[str, Any]] = []
-        for process in interrupted:
-            process_id = process.get("process_id")
+        for candidate in candidates:
+            process_id = candidate.get("process_id")
             if not process_id:
                 continue
-            if process.get("status") == "stop_requested":
+            process = self._claim_stale_process_for_recovery(
+                str(process_id),
+                str(candidate.get("status") or ""),
+                stale_before,
+                now,
+            )
+            if process is None:
+                continue
+            metadata = dict(process.get("metadata") or {})
+            previous_status = str(
+                metadata.get("recovery_previous_status")
+                if process.get("status") == "recovering"
+                else process.get("status")
+            )
+            if previous_status == "stop_requested":
                 recovered.append(self._recover_stale_stop_requested_process(process, now))
-            elif process.get("status") == "acquiring_browser":
+            elif previous_status == "acquiring_browser":
                 recovered.append(self._recover_stale_acquiring_browser_process(process, now))
             else:
                 recovered.append(self._recover_stale_running_process(process, now))
@@ -552,22 +566,61 @@ class MongoDBService:
             )
         return recovered
 
+    def _claim_stale_process_for_recovery(
+        self,
+        process_id: str,
+        status: str,
+        stale_before: datetime,
+        now: datetime,
+    ) -> dict[str, Any] | None:
+        recovery_fields = {
+            "status": "recovering",
+            "updated_at": now,
+            "metadata.recovery_claimed_at": now,
+        }
+        if status != "recovering":
+            recovery_fields["metadata.recovery_previous_status"] = status
+        return self._get_collection("process_uploads").find_one_and_update(
+            {
+                "process_id": process_id,
+                "status": status,
+                "updated_at": {"$lte": stale_before},
+            },
+            {"$set": recovery_fields},
+            projection={"_id": 0},
+            return_document=ReturnDocument.BEFORE,
+        )
+
     async def find_stale_queued_processes(self, *, queued_after_seconds: int) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._find_stale_queued_processes_sync, queued_after_seconds)
 
     def _find_stale_queued_processes_sync(self, queued_after_seconds: int) -> list[dict[str, Any]]:
-        stale_before = datetime.utcnow() - timedelta(seconds=max(1, int(queued_after_seconds)))
-        processes = list(
-            self._get_collection("process_uploads")
-            .find(
+        now = datetime.utcnow()
+        stale_before = now - timedelta(seconds=max(1, int(queued_after_seconds)))
+        claimed: list[dict[str, Any]] = []
+        while True:
+            process = self._get_collection("process_uploads").find_one_and_update(
                 {
                     "status": "queued",
                     "updated_at": {"$lte": stale_before},
+                    "$or": [
+                        {"metadata.requeue_claimed_at": {"$exists": False}},
+                        {"metadata.requeue_claimed_at": {"$lte": stale_before}},
+                    ],
                 },
-                {"_id": 0},
+                {
+                    "$set": {
+                        "updated_at": now,
+                        "metadata.requeue_claimed_at": now,
+                    }
+                },
+                sort=[("updated_at", ASCENDING)],
+                projection={"_id": 0},
+                return_document=ReturnDocument.AFTER,
             )
-            .sort("updated_at", ASCENDING)
-        )
+            if process is None:
+                break
+            claimed.append(process)
         return [
             {
                 "process_id": process.get("process_id"),
@@ -575,7 +628,7 @@ class MongoDBService:
                 "recovered_status": "queued",
                 "action": "requeue_stale_queued",
             }
-            for process in processes
+            for process in claimed
             if process.get("process_id")
         ]
 
@@ -584,7 +637,7 @@ class MongoDBService:
         stopped_result = self._get_collection("domain_runs").update_many(
             {
                 "process_id": process_id,
-                "status": {"$in": ["queued", "acquiring_browser", "running", "stop_requested"]},
+                "status": {"$in": ["queued", "acquiring_browser", "recovering", "running", "stop_requested"]},
             },
             {
                 "$set": {
@@ -647,7 +700,7 @@ class MongoDBService:
         reset_result = self._get_collection("domain_runs").update_many(
             {
                 "process_id": process_id,
-                "status": {"$in": ["queued", "acquiring_browser", "running", "stop_requested"]},
+                "status": {"$in": ["queued", "acquiring_browser", "recovering", "running", "stop_requested"]},
             },
             {
                 "$set": {
@@ -895,7 +948,7 @@ class MongoDBService:
                     "process_id": process_id,
                     "domain_key": key.get("domain_key"),
                     "career_page_url": key.get("career_page_url"),
-                    "status": {"$in": ["queued", "acquiring_browser", "running", "stop_requested"]},
+                    "status": {"$in": ["queued", "acquiring_browser", "recovering", "running", "stop_requested"]},
                 },
                 {
                     "$set": {

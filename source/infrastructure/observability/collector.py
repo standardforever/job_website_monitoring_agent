@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -19,8 +20,21 @@ class ObservabilityCollector:
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
         self._mongo = MongoClient(self._settings.mongodb_uri)[self._settings.mongodb_database]
+        self._snapshot_cache: dict[str, Any] | None = None
+        self._snapshot_cache_until = 0.0
 
     def snapshot(self) -> dict[str, Any]:
+        now = time.time()
+        if self._snapshot_cache is not None and now < self._snapshot_cache_until:
+            return dict(self._snapshot_cache)
+        snapshot = self._build_snapshot()
+        ttl = max(0, int(self._settings.observability_cache_ttl_seconds))
+        if ttl:
+            self._snapshot_cache = dict(snapshot)
+            self._snapshot_cache_until = now + ttl
+        return snapshot
+
+    def _build_snapshot(self) -> dict[str, Any]:
         process_metrics = self._process_metrics()
         domain_metrics = self._domain_metrics()
         email_metrics = self._email_metrics()

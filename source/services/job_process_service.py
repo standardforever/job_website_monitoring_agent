@@ -97,7 +97,7 @@ class JobProcessService:
         if process is None:
             raise ValueError("Process not found")
         status = str(process.get("status") or "").strip().lower()
-        if status in {"queued", "acquiring_browser", "running", "stop_requested"}:
+        if status in {"queued", "acquiring_browser", "recovering", "running", "stop_requested"}:
             raise ValueError(f"Process {process_id} is currently {status} and cannot be rerun yet.")
         rerun_process = await self._mongodb_service.reset_process_for_rerun(process_id)
         if rerun_process is None:
@@ -134,7 +134,7 @@ class JobProcessService:
         self._stop_requests.add(process_id)
         updated = await self._mongodb_service.mark_process_stop_requested(process_id)
         process_with_domains = await self._mongodb_service.get_process_with_domains(process_id)
-        if status in {"queued", "acquiring_browser"} and not (process_with_domains or {}).get("started_at"):
+        if status in {"queued", "acquiring_browser", "recovering"} and not (process_with_domains or {}).get("started_at"):
             items = list((process_with_domains or {}).get("items") or [])
             await self._mongodb_service.mark_domains_stopped(
                 process_id,
