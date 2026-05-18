@@ -41,7 +41,7 @@ async def ensure_mongodb_indexes() -> None:
     await mongodb_service.ensure_indexes()
     log_event(logger, "info", "fastapi_startup_indexes_ensured", domain="mongodb")
     if settings.process_execution_mode == "celery":
-        recovered = await recover_and_requeue_interrupted_processes()
+        recovered = await recover_and_requeue_interrupted_processes(recover_broker=True)
         log_event(
             logger,
             "info",

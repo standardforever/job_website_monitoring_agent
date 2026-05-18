@@ -1,0 +1,38 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-redis-queue
+  namespace: job-monitoring
+spec:
+  scaleTargetRef:
+    name: worker
+  pollingInterval: 15
+  cooldownPeriod: 300
+  minReplicaCount: 1
+  maxReplicaCount: 20
+  fallback:
+    failureThreshold: 3
+    replicas: 1
+  advanced:
+    restoreToOriginalReplicaCount: false
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 30
+          policies:
+            - type: Pods
+              value: 4
+              periodSeconds: 60
+        scaleDown:
+          stabilizationWindowSeconds: 600
+          policies:
+            - type: Pods
+              value: 2
+              periodSeconds: 300
+  triggers:
+    - type: redis
+      metadata:
+        address: redis.job-monitoring.svc.cluster.local:6379
+        listName: processes
+        listLength: "1"
+        databaseIndex: "0"

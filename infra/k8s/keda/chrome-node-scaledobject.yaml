@@ -1,0 +1,35 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: chrome-node-redis-queue
+  namespace: job-monitoring
+spec:
+  scaleTargetRef:
+    name: chrome-node
+  pollingInterval: 15
+  cooldownPeriod: 600
+  minReplicaCount: 1
+  maxReplicaCount: 20
+  advanced:
+    restoreToOriginalReplicaCount: false
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 30
+          policies:
+            - type: Pods
+              value: 4
+              periodSeconds: 60
+        scaleDown:
+          stabilizationWindowSeconds: 900
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 300
+  triggers:
+    - type: redis
+      metadata:
+        address: redis.job-monitoring.svc.cluster.local:6379
+        listName: processes
+        listLength: "1"
+        databaseIndex: "0"

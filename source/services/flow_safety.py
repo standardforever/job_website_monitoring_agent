@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from urllib.parse import urljoin, urlparse, parse_qs
-import tldextract
 import os
+from utils import tld
 
 SKIP_EXTENSIONS = frozenset({
     ".pdf", ".doc", ".docx", ".xls", ".xlsx",
@@ -105,7 +105,7 @@ def extract_base_domain(value: str | None) -> str | None:
     if not hostname:
         return None
 
-    extracted = tldextract.extract(hostname)
+    extracted = tld.extract(hostname)
     if extracted.domain and extracted.suffix:
         return f"{extracted.domain}.{extracted.suffix}".lower()
     return hostname if "." in hostname else None

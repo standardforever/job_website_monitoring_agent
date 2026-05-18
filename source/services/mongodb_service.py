@@ -594,6 +594,16 @@ class MongoDBService:
     async def find_stale_queued_processes(self, *, queued_after_seconds: int) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._find_stale_queued_processes_sync, queued_after_seconds)
 
+    async def count_active_processes(self) -> int:
+        return await asyncio.to_thread(self._count_active_processes_sync)
+
+    def _count_active_processes_sync(self) -> int:
+        return int(
+            self._get_collection("process_uploads").count_documents(
+                {"status": {"$in": ["acquiring_browser", "recovering", "running", "stop_requested"]}}
+            )
+        )
+
     def _find_stale_queued_processes_sync(self, queued_after_seconds: int) -> list[dict[str, Any]]:
         now = datetime.utcnow()
         stale_before = now - timedelta(seconds=max(1, int(queued_after_seconds)))

@@ -20,6 +20,12 @@ logger = logging.getLogger("autoscaler")
 
 @dataclass(slots=True)
 class ScalerConfig:
+    scaling_enabled: bool = os.getenv("AUTOSCALER_SCALING_ENABLED", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     redis_url: str = os.getenv("AUTOSCALER_REDIS_URL", os.getenv("CELERY_BROKER_URL", "redis://redis:6379/0"))
     redis_queue_name: str = os.getenv("AUTOSCALER_REDIS_QUEUE", "processes")
     redis_unacked_key: str = os.getenv("AUTOSCALER_REDIS_UNACKED_KEY", "unacked")
@@ -98,13 +104,15 @@ class Autoscaler:
         self._idle_since: float | None = None
 
     def run_forever(self) -> None:
-        logger.info("autoscaler_started config=%s", self._config)
+        mode = "autoscale" if self._config.scaling_enabled else "monitor"
+        logger.info("autoscaler_started mode=%s config=%s", mode, self._config)
         while True:
             try:
                 state = self._read_state()
                 worker_target, chrome_target = self._desired_counts(state)
                 logger.info(
-                    "autoscaler_state queue=%s unacked=%s mongo_queued=%s acquiring_browser=%s recovering=%s running=%s workers=%s healthy_workers=%s/%s chrome=%s/%s slots=%s/%s cpu=%.1f mem=%.1f target_workers=%s target_chrome=%s",
+                    "autoscaler_state mode=%s queue=%s unacked=%s mongo_queued=%s acquiring_browser=%s recovering=%s running=%s workers=%s healthy_workers=%s/%s chrome=%s/%s slots=%s/%s cpu=%.1f mem=%.1f target_workers=%s target_chrome=%s",
+                    mode,
                     state.queue_depth,
                     state.celery_unacked,
                     state.mongo_queued,
@@ -123,7 +131,8 @@ class Autoscaler:
                     worker_target,
                     chrome_target,
                 )
-                self._scale_if_needed(state, worker_target, chrome_target)
+                if self._config.scaling_enabled:
+                    self._scale_if_needed(state, worker_target, chrome_target)
             except Exception as exc:
                 logger.exception("autoscaler_error error=%s", exc)
             time.sleep(self._config.poll_seconds)
@@ -245,13 +254,20 @@ class Autoscaler:
             "-c",
             "celery -A infrastructure.queue.celery_app:celery_app inspect ping -d worker@$(hostname) --timeout=3",
         ]
-        result = subprocess.run(
-            command,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=self._config.worker_health_timeout_seconds,
-        )
+        try:
+            result = subprocess.run(
+                command,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=self._config.worker_health_timeout_seconds,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("worker_health_check_timeout container_id=%s", container_id)
+            return False
+        except Exception as exc:
+            logger.warning("worker_health_check_failed container_id=%s error=%s", container_id, exc)
+            return False
         return result.returncode == 0 and "OK" in result.stdout
 
     def _desired_counts(self, state: ScaleState) -> tuple[int, int]:

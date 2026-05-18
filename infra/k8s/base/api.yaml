@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: job-monitoring
+  labels:
+    app.kubernetes.io/name: job-monitoring-agent
+    app.kubernetes.io/component: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: job-monitoring-agent
+        app.kubernetes.io/component: api
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: api
+          image: ghcr.io/your-org/job-website-monitoring-agent:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8110
+          envFrom:
+            - configMapRef:
+                name: job-monitoring-config
+            - secretRef:
+                name: job-monitoring-secrets
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: job-monitoring
+  labels:
+    app.kubernetes.io/name: job-monitoring-agent
+    app.kubernetes.io/component: api
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: 8110
+      targetPort: http

@@ -3,8 +3,6 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import urlparse
 
-import tldextract
-
 from services.carrer_url_extractor import UrlExtractor
 from services.flow_safety import extract_base_domain
 
