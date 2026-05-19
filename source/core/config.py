@@ -49,7 +49,6 @@ class Settings:
     browser_session_max_retries: int = int(os.getenv("BROWSER_SESSION_MAX_RETRIES", "0"))
     browser_session_monitor_interval_seconds: int = int(os.getenv("BROWSER_SESSION_MONITOR_INTERVAL_SECONDS", "15"))
     browser_session_monitor_misses: int = int(os.getenv("BROWSER_SESSION_MONITOR_MISSES", "3"))
-    process_assignment_concurrency: int = int(os.getenv("PROCESS_ASSIGNMENT_CONCURRENCY", "1"))
     domain_process_timeout_seconds: int = int(os.getenv("DOMAIN_PROCESS_TIMEOUT_SECONDS", "1800"))
     process_recovery_enabled: bool = os.getenv("PROCESS_RECOVERY_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     process_recovery_stale_after_seconds: int = int(os.getenv("PROCESS_RECOVERY_STALE_AFTER_SECONDS", "300"))

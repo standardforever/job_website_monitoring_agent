@@ -41,8 +41,9 @@ class ProcessExecutor:
         if process is None:
             return await self.skipped_or_invalid_process(process_id)
 
+        worker_id = _process_worker_id(process)
         heartbeat_stop = asyncio.Event()
-        heartbeat_task = asyncio.create_task(self._heartbeat_until_stopped(process_id, heartbeat_stop))
+        heartbeat_task = asyncio.create_task(self._heartbeat_until_stopped(process_id, heartbeat_stop, worker_id))
         client = await self._mongodb_service.get_client(str(process.get("client_key") or ""))
         runtime_tokens = self._set_runtime_config(client, process)
         browser_runtime = None
@@ -71,10 +72,11 @@ class ProcessExecutor:
                 raise BrowserCapacityUnavailable("Process changed state before browser acquisition completed")
             process = {**process, **running_process}
 
-            worker_results = await self._run_assignments(
-                process_id,
-                self._hydrate_assignments(process, assignments),
-                browser_runtime,
+            worker_results = await asyncio.gather(
+                *[
+                    self._run_assignment(process_id, assignment, browser_runtime)
+                    for assignment in self._hydrate_assignments(process, assignments)
+                ]
             )
             return await self._complete_process(process_id, domains, assignments, worker_results)
         finally:
@@ -85,17 +87,19 @@ class ProcessExecutor:
 
     async def execute_with_browser(self, process: dict[str, Any], browser_runtime: Any) -> dict[str, Any]:
         process_id = str(process["process_id"])
+        worker_id = _process_worker_id(process)
         heartbeat_stop = asyncio.Event()
-        heartbeat_task = asyncio.create_task(self._heartbeat_until_stopped(process_id, heartbeat_stop))
+        heartbeat_task = asyncio.create_task(self._heartbeat_until_stopped(process_id, heartbeat_stop, worker_id))
         client = await self._mongodb_service.get_client(str(process.get("client_key") or ""))
         runtime_tokens = self._set_runtime_config(client, process)
         try:
             domains, assignments = self._domains_and_assignments(process)
             self._log_started(process_id, domains, assignments)
-            worker_results = await self._run_assignments(
-                process_id,
-                self._hydrate_assignments(process, assignments),
-                browser_runtime,
+            worker_results = await asyncio.gather(
+                *[
+                    self._run_assignment(process_id, assignment, browser_runtime)
+                    for assignment in self._hydrate_assignments(process, assignments)
+                ]
             )
             return await self._complete_process(process_id, domains, assignments, worker_results)
         finally:
@@ -173,23 +177,6 @@ class ProcessExecutor:
                 [error],
             )
 
-    async def _run_assignments(
-        self,
-        process_id: str,
-        assignments: list[dict[str, Any]],
-        browser_runtime: Any,
-    ) -> list[dict[str, Any]]:
-        concurrency = max(1, int(get_settings().process_assignment_concurrency))
-        results: list[dict[str, Any]] = []
-        for start in range(0, len(assignments), concurrency):
-            batch = assignments[start:start + concurrency]
-            results.extend(
-                await asyncio.gather(
-                    *[self._run_assignment(process_id, assignment, browser_runtime) for assignment in batch]
-                )
-            )
-        return results
-
     async def _unfinished_assignment_domains(self, process_id: str, assignment: dict[str, Any]) -> list[dict[str, Any]]:
         process = await self._mongodb_service.get_process_with_domains(process_id)
         completed_statuses = {"completed", "failed", "stopped"}
@@ -204,11 +191,11 @@ class ProcessExecutor:
             not in completed_statuses
         ]
 
-    async def _heartbeat_until_stopped(self, process_id: str, stop_event: asyncio.Event) -> None:
+    async def _heartbeat_until_stopped(self, process_id: str, stop_event: asyncio.Event, worker_id: str | None) -> None:
         interval = max(5, int(get_settings().process_heartbeat_interval_seconds))
         while not stop_event.is_set():
             try:
-                await self._mongodb_service.heartbeat_process(process_id, "executing")
+                await self._mongodb_service.heartbeat_process(process_id, "executing", worker_id)
             except Exception as exc:
                 log_event(
                     logger,
@@ -326,6 +313,18 @@ class ProcessExecutor:
         status = derive_status_from_summary(summary, stop_requested=stop_requested, errors=errors)
         await self._mongodb_service.update_process_upload(
             process_id,
-            {"status": status, "completed_at": datetime.utcnow(), "errors": errors, "summary": summary},
+            {
+                "status": status,
+                "completed_at": datetime.utcnow(),
+                "errors": errors,
+                "summary": summary,
+                "metadata.capacity_state": "finished",
+            },
         )
         return {"process_id": process_id, "status": status, "errors": errors, "worker_results": worker_results, "summary": summary}
+
+
+def _process_worker_id(process: dict[str, Any]) -> str | None:
+    metadata = process.get("metadata") if isinstance(process.get("metadata"), dict) else {}
+    worker_id = metadata.get("worker_id")
+    return str(worker_id) if worker_id else None

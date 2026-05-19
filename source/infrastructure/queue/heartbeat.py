@@ -14,7 +14,7 @@ logger = get_logger("queue_heartbeat")
 
 
 def current_worker_id() -> str:
-    return os.getenv("WORKER_ID") or f"{socket.gethostname()}-{os.getpid()}"
+    return os.getenv("WORKER_ID") or socket.gethostname()
 
 
 @dataclass(slots=True)

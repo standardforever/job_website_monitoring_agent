@@ -360,13 +360,19 @@ class MongoDBService:
             update_fields=sorted(updates.keys()),
         )
 
-    async def heartbeat_process(self, process_id: str, state: str) -> None:
-        await asyncio.to_thread(self._heartbeat_process_sync, process_id, state)
+    async def heartbeat_process(self, process_id: str, state: str, worker_id: str | None = None) -> None:
+        await asyncio.to_thread(self._heartbeat_process_sync, process_id, state, worker_id)
 
-    def _heartbeat_process_sync(self, process_id: str, state: str) -> None:
+    def _heartbeat_process_sync(self, process_id: str, state: str, worker_id: str | None) -> None:
         now = datetime.utcnow()
+        query: dict[str, Any] = {
+            "process_id": process_id,
+            "status": {"$in": ["acquiring_browser", "recovering", "running", "stop_requested"]},
+        }
+        if worker_id:
+            query["metadata.worker_id"] = worker_id
         self._get_collection("process_uploads").update_one(
-            {"process_id": process_id, "status": {"$in": ["acquiring_browser", "recovering", "running", "stop_requested"]}},
+            query,
             {
                 "$set": {
                     "updated_at": now,
@@ -381,6 +387,9 @@ class MongoDBService:
 
     def _release_process_for_browser_retry_sync(self, process_id: str, error: str, retry_delay_seconds: int) -> None:
         now = datetime.utcnow()
+        retry_delay = max(1, int(retry_delay_seconds))
+        recovery_grace = max(1, int(get_settings().process_recovery_queued_after_seconds))
+        retry_reserved_until = now + timedelta(seconds=retry_delay + recovery_grace)
         updates = {
             "$set": {
                 "status": "queued",
@@ -389,7 +398,9 @@ class MongoDBService:
                 "metadata.capacity_state": "waiting_for_browser",
                 "metadata.last_browser_acquire_error": error,
                 "metadata.last_browser_wait_at": now,
-                "metadata.next_browser_retry_after_seconds": retry_delay_seconds,
+                "metadata.next_browser_retry_after_seconds": retry_delay,
+                "metadata.next_browser_retry_at": now + timedelta(seconds=retry_delay),
+                "metadata.requeue_claimed_at": retry_reserved_until,
             },
             "$inc": {"metadata.browser_acquire_attempt_count": 1},
             "$unset": {"metadata.claimed_at": "", "metadata.worker_id": ""},
@@ -403,10 +414,11 @@ class MongoDBService:
             "info",
             "mongodb_release_process_for_browser_retry process_id=%s retry_delay_seconds=%s",
             process_id,
-            retry_delay_seconds,
+            retry_delay,
             domain="mongodb",
             process_id=process_id,
-            retry_delay_seconds=retry_delay_seconds,
+            retry_delay_seconds=retry_delay,
+            requeue_claimed_until=retry_reserved_until.isoformat(),
         )
 
     async def claim_next_queued_process(self, worker_id: str | None = None) -> dict[str, Any] | None:
@@ -488,7 +500,14 @@ class MongoDBService:
                     "updated_at": now,
                     "metadata.capacity_state": "browser_acquired",
                     "metadata.browser_acquired_at": now,
-                }
+                },
+                "$unset": {
+                    "metadata.requeue_claimed_at": "",
+                    "metadata.next_browser_retry_at": "",
+                    "metadata.next_browser_retry_after_seconds": "",
+                    "metadata.last_browser_acquire_error": "",
+                    "metadata.last_browser_wait_at": "",
+                },
             },
             projection={"_id": 0},
             return_document=ReturnDocument.AFTER,
@@ -695,7 +714,8 @@ class MongoDBService:
 
     def _find_stale_queued_processes_sync(self, queued_after_seconds: int) -> list[dict[str, Any]]:
         now = datetime.utcnow()
-        stale_before = now - timedelta(seconds=max(1, int(queued_after_seconds)))
+        queued_after = max(1, int(queued_after_seconds))
+        stale_before = now - timedelta(seconds=queued_after)
         claimed: list[dict[str, Any]] = []
         while True:
             process = self._get_collection("process_uploads").find_one_and_update(
@@ -710,7 +730,7 @@ class MongoDBService:
                 {
                     "$set": {
                         "updated_at": now,
-                        "metadata.requeue_claimed_at": now,
+                        "metadata.requeue_claimed_at": now + timedelta(seconds=queued_after),
                     }
                 },
                 sort=[("updated_at", ASCENDING)],

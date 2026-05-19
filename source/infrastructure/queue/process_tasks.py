@@ -74,13 +74,14 @@ def execute_process(self, process_id: str) -> dict[str, Any]:
 async def _execute_process_with_allocated_browser(process_id: str) -> dict[str, Any]:
     browser_runtime = None
     heartbeat = None
-    process = await process_task_service.claim_process_for_execution(process_id)
+    worker_id = current_worker_id()
+    process = await process_task_service.claim_process_for_execution(process_id, worker_id)
     if process is None:
         return await process_task_service.skipped_or_invalid_process(process_id)
 
     try:
         process, browser_runtime = await process_task_service.acquire_browser_for_process(process)
-        heartbeat = build_process_heartbeat(process_id, current_worker_id())
+        heartbeat = build_process_heartbeat(process_id, worker_id)
         await heartbeat.start()
         log_event(
             logger,
