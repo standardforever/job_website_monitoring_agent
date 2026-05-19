@@ -85,7 +85,9 @@ class ObservabilityCollector:
 
             client = Redis.from_url(self._settings.celery_broker_url, decode_responses=True)
             depth = int(client.llen(self._settings.observability_redis_queue))
-            active_jobs = int(client.get(self._settings.redis_active_process_counter_key) or 0)
+            active_jobs = self._mongo[self._settings.mongodb_process_uploads_collection].count_documents(
+                {"status": {"$in": ["acquiring_browser", "recovering", "running", "stop_requested"]}}
+            )
             return {
                 "queue_name": self._settings.observability_redis_queue,
                 "depth": depth,

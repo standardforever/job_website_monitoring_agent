@@ -9,7 +9,7 @@ services:
       PROCESS_EXECUTION_MODE: celery
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
-      CELERY_TASK_QUEUE: ${CELERY_TASK_QUEUE:-processes}
+      CELERY_TASK_QUEUE: ${CELERY_TASK_QUEUE:-agent_jobs}
       SELENIUM_REMOTE_URL: http://selenium-hub:4444/wd/hub
       MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
       MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
@@ -39,7 +39,7 @@ services:
         "worker",
         "--loglevel=INFO",
         "--concurrency=${CELERY_WORKER_CONCURRENCY:-1}",
-        "--queues=${CELERY_TASK_QUEUE:-processes}",
+        "--queues=${CELERY_TASK_QUEUE:-agent_jobs}",
         "--hostname=worker@%h",
       ]
     env_file:
@@ -48,12 +48,10 @@ services:
       PROCESS_EXECUTION_MODE: celery
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
-      CELERY_TASK_QUEUE: ${CELERY_TASK_QUEUE:-processes}
+      CELERY_TASK_QUEUE: ${CELERY_TASK_QUEUE:-agent_jobs}
       REDIS_PROCESS_HEARTBEAT_TTL_SECONDS: ${REDIS_PROCESS_HEARTBEAT_TTL_SECONDS:-7200}
       REDIS_PROCESS_HEARTBEAT_INTERVAL_SECONDS: ${REDIS_PROCESS_HEARTBEAT_INTERVAL_SECONDS:-3600}
       REDIS_PROCESS_HEARTBEAT_PREFIX: ${REDIS_PROCESS_HEARTBEAT_PREFIX:-heartbeat}
-      REDIS_ACTIVE_PROCESS_COUNTER_KEY: ${REDIS_ACTIVE_PROCESS_COUNTER_KEY:-active_agent_jobs}
-      REDIS_ACTIVE_PROCESS_MARKER_PREFIX: ${REDIS_ACTIVE_PROCESS_MARKER_PREFIX:-active_agent_job}
       WATCHDOG_ENABLED: ${WATCHDOG_ENABLED:-true}
       WATCHDOG_INTERVAL_SECONDS: ${WATCHDOG_INTERVAL_SECONDS:-1800}
       WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-3}
@@ -93,7 +91,7 @@ services:
       PROCESS_EXECUTION_MODE: celery
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
-      CELERY_TASK_QUEUE: ${CELERY_TASK_QUEUE:-processes}
+      CELERY_TASK_QUEUE: ${CELERY_TASK_QUEUE:-agent_jobs}
       WATCHDOG_ENABLED: ${WATCHDOG_ENABLED:-true}
       WATCHDOG_INTERVAL_SECONDS: ${WATCHDOG_INTERVAL_SECONDS:-1800}
       MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
@@ -135,108 +133,11 @@ services:
         condition: service_started
     restart: unless-stopped
 
-  autoscaler:
-    build:
-      context: .
-      dockerfile: Dockerfile.autoscaler
-    profiles:
-      - autoscale
-    env_file:
-      - ./source/.env
-    environment:
-      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-job_website_monitoring_agent}
-      AUTOSCALER_REDIS_URL: redis://redis:6379/0
-      AUTOSCALER_REDIS_QUEUE: ${CELERY_TASK_QUEUE:-processes}
-      AUTOSCALER_COMPOSE_PROJECT_DIR: ${PWD}
-      MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
-      MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
-      MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
-      SELENIUM_STATUS_URL: http://selenium-hub:4444/status
-      AUTOSCALER_POLL_SECONDS: ${AUTOSCALER_POLL_SECONDS:-15}
-      AUTOSCALER_COOLDOWN_SECONDS: ${AUTOSCALER_COOLDOWN_SECONDS:-90}
-      AUTOSCALER_SCALE_UP_COOLDOWN_SECONDS: ${AUTOSCALER_SCALE_UP_COOLDOWN_SECONDS:-30}
-      AUTOSCALER_IDLE_SCALE_DOWN_SECONDS: ${AUTOSCALER_IDLE_SCALE_DOWN_SECONDS:-180}
-      AUTOSCALER_COMPOSE_TIMEOUT_SECONDS: ${AUTOSCALER_COMPOSE_TIMEOUT_SECONDS:-30}
-      AUTOSCALER_MIN_WORKERS: ${AUTOSCALER_MIN_WORKERS:-1}
-      AUTOSCALER_MAX_WORKERS: ${AUTOSCALER_MAX_WORKERS:-8}
-      AUTOSCALER_MIN_CHROME_NODES: ${AUTOSCALER_MIN_CHROME_NODES:-1}
-      AUTOSCALER_MAX_CHROME_NODES: ${AUTOSCALER_MAX_CHROME_NODES:-16}
-      AUTOSCALER_TASKS_PER_WORKER: ${AUTOSCALER_TASKS_PER_WORKER:-1}
-      AUTOSCALER_CHROME_NODES_PER_WORKER: ${AUTOSCALER_CHROME_NODES_PER_WORKER:-1}
-      AUTOSCALER_MAX_CPU_PERCENT: ${AUTOSCALER_MAX_CPU_PERCENT:-75}
-      AUTOSCALER_MAX_MEMORY_PERCENT: ${AUTOSCALER_MAX_MEMORY_PERCENT:-80}
-      AUTOSCALER_MEMORY_BUFFER_MB: ${AUTOSCALER_MEMORY_BUFFER_MB:-2048}
-      AUTOSCALER_ESTIMATED_WORKER_MEMORY_MB: ${AUTOSCALER_ESTIMATED_WORKER_MEMORY_MB:-350}
-      AUTOSCALER_ESTIMATED_CHROME_MEMORY_MB: ${AUTOSCALER_ESTIMATED_CHROME_MEMORY_MB:-1200}
-      AUTOSCALER_CHROME_SHM_SIZE_MB: ${AUTOSCALER_CHROME_SHM_SIZE_MB:-2048}
-      AUTOSCALER_MEMORY_SAFETY_FACTOR: ${AUTOSCALER_MEMORY_SAFETY_FACTOR:-1.25}
-      AUTOSCALER_WORKER_HEALTH_CHECK_ENABLED: "false"
-      AUTOSCALER_WORKER_HEALTH_TIMEOUT_SECONDS: ${AUTOSCALER_WORKER_HEALTH_TIMEOUT_SECONDS:-8}
-      AUTOSCALER_SCALING_ENABLED: "true"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - .:/app
-      - ${PWD}:${PWD}
-    depends_on:
-      mongo:
-        condition: service_started
-      redis:
-        condition: service_started
-      selenium-hub:
-        condition: service_started
-    restart: unless-stopped
-
-  infra-monitor:
-    build:
-      context: .
-      dockerfile: Dockerfile.autoscaler
-    profiles:
-      - monitor
-    env_file:
-      - ./source/.env
-    environment:
-      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-job_website_monitoring_agent}
-      AUTOSCALER_SCALING_ENABLED: "false"
-      AUTOSCALER_REDIS_URL: redis://redis:6379/0
-      AUTOSCALER_REDIS_QUEUE: ${CELERY_TASK_QUEUE:-processes}
-      AUTOSCALER_COMPOSE_PROJECT_DIR: ${PWD}
-      MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
-      MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
-      MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
-      SELENIUM_STATUS_URL: http://selenium-hub:4444/status
-      AUTOSCALER_POLL_SECONDS: ${INFRA_MONITOR_POLL_SECONDS:-15}
-      AUTOSCALER_COMPOSE_TIMEOUT_SECONDS: ${AUTOSCALER_COMPOSE_TIMEOUT_SECONDS:-30}
-      AUTOSCALER_MIN_WORKERS: ${AUTOSCALER_MIN_WORKERS:-1}
-      AUTOSCALER_MAX_WORKERS: ${AUTOSCALER_MAX_WORKERS:-8}
-      AUTOSCALER_MIN_CHROME_NODES: ${AUTOSCALER_MIN_CHROME_NODES:-1}
-      AUTOSCALER_MAX_CHROME_NODES: ${AUTOSCALER_MAX_CHROME_NODES:-16}
-      AUTOSCALER_TASKS_PER_WORKER: ${AUTOSCALER_TASKS_PER_WORKER:-1}
-      AUTOSCALER_CHROME_NODES_PER_WORKER: ${AUTOSCALER_CHROME_NODES_PER_WORKER:-1}
-      AUTOSCALER_MAX_CPU_PERCENT: ${AUTOSCALER_MAX_CPU_PERCENT:-75}
-      AUTOSCALER_MAX_MEMORY_PERCENT: ${AUTOSCALER_MAX_MEMORY_PERCENT:-80}
-      AUTOSCALER_MEMORY_BUFFER_MB: ${AUTOSCALER_MEMORY_BUFFER_MB:-2048}
-      AUTOSCALER_ESTIMATED_WORKER_MEMORY_MB: ${AUTOSCALER_ESTIMATED_WORKER_MEMORY_MB:-350}
-      AUTOSCALER_ESTIMATED_CHROME_MEMORY_MB: ${AUTOSCALER_ESTIMATED_CHROME_MEMORY_MB:-1200}
-      AUTOSCALER_CHROME_SHM_SIZE_MB: ${AUTOSCALER_CHROME_SHM_SIZE_MB:-2048}
-      AUTOSCALER_MEMORY_SAFETY_FACTOR: ${AUTOSCALER_MEMORY_SAFETY_FACTOR:-1.25}
-      AUTOSCALER_WORKER_HEALTH_CHECK_ENABLED: ${AUTOSCALER_WORKER_HEALTH_CHECK_ENABLED:-true}
-      AUTOSCALER_WORKER_HEALTH_TIMEOUT_SECONDS: ${AUTOSCALER_WORKER_HEALTH_TIMEOUT_SECONDS:-8}
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - .:/app
-      - ${PWD}:${PWD}
-    depends_on:
-      mongo:
-        condition: service_started
-      redis:
-        condition: service_started
-      selenium-hub:
-        condition: service_started
-    restart: unless-stopped
-
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
     volumes:
       - ./redis-data:/data
     restart: unless-stopped
@@ -269,6 +170,8 @@ services:
 
   mongo:
     image: mongo:7
+    ports:
+      - "27017:27017"
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-admin}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-secret}
@@ -279,10 +182,10 @@ services:
 
   mongo-express:
     image: mongo-express:latest
-    profiles:
-      - debug
+    # profiles:
+    #   - debug
     ports:
-      - "${MONGO_EXPRESS_PORT:-8081}:8081"
+      - "8081:8081"
     environment:
       ME_CONFIG_MONGODB_ADMINUSERNAME: ${MONGO_ROOT_USERNAME:-admin}
       ME_CONFIG_MONGODB_ADMINPASSWORD: ${MONGO_ROOT_PASSWORD:-secret}

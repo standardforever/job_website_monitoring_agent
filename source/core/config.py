@@ -42,7 +42,7 @@ class Settings:
     celery_result_backend: str = os.getenv("CELERY_RESULT_BACKEND", "redis://127.0.0.1:6379/1")
     celery_task_queue: str = os.getenv("CELERY_TASK_QUEUE", "processes")
     celery_visibility_timeout_seconds: int = int(os.getenv("CELERY_VISIBILITY_TIMEOUT_SECONDS", "86400"))
-    celery_unacked_key: str = os.getenv("CELERY_UNACKED_KEY", os.getenv("AUTOSCALER_REDIS_UNACKED_KEY", "unacked"))
+    celery_unacked_key: str = os.getenv("CELERY_UNACKED_KEY", "unacked")
     browser_session_acquire_timeout_seconds: int = int(os.getenv("BROWSER_SESSION_ACQUIRE_TIMEOUT_SECONDS", "600"))
     browser_session_retry_delay_seconds: int = int(os.getenv("BROWSER_SESSION_RETRY_DELAY_SECONDS", "60"))
     browser_session_max_wait_hours: float = float(os.getenv("BROWSER_SESSION_MAX_WAIT_HOURS", "24"))
@@ -58,8 +58,6 @@ class Settings:
     redis_process_heartbeat_ttl_seconds: int = int(os.getenv("REDIS_PROCESS_HEARTBEAT_TTL_SECONDS", "7200"))
     redis_process_heartbeat_interval_seconds: int = int(os.getenv("REDIS_PROCESS_HEARTBEAT_INTERVAL_SECONDS", "3600"))
     redis_process_heartbeat_prefix: str = os.getenv("REDIS_PROCESS_HEARTBEAT_PREFIX", "heartbeat")
-    redis_active_process_counter_key: str = os.getenv("REDIS_ACTIVE_PROCESS_COUNTER_KEY", "active_agent_jobs")
-    redis_active_process_marker_prefix: str = os.getenv("REDIS_ACTIVE_PROCESS_MARKER_PREFIX", "active_agent_job")
     watchdog_enabled: bool = os.getenv("WATCHDOG_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     watchdog_interval_seconds: int = int(os.getenv("WATCHDOG_INTERVAL_SECONDS", "1800"))
     observability_enabled: bool = os.getenv("OBSERVABILITY_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}

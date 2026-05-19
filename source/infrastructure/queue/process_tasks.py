@@ -13,7 +13,6 @@ from infrastructure.queue.celery_app import celery_app
 from infrastructure.queue.heartbeat import (
     build_process_heartbeat,
     current_worker_id,
-    decrement_active_if_marked,
     heartbeat_key,
 )
 from infrastructure.queue.recovery import recover_and_requeue_interrupted_processes
@@ -225,7 +224,6 @@ async def _watchdog_dead_processes() -> dict[str, Any]:
     mongodb_service = MongoDBService()
     running_processes = await mongodb_service.list_running_processes()
     requeued: list[str] = []
-    cleaned_active_markers: list[str] = []
 
     for process in running_processes:
         process_id = str(process.get("process_id") or "").strip()
@@ -238,7 +236,6 @@ async def _watchdog_dead_processes() -> dict[str, Any]:
         recovered = await mongodb_service.recover_process_missing_heartbeat(process_id)
         if recovered is None or recovered.get("recovered_status") != "queued":
             continue
-        decrement_active_if_marked(redis_client, process_id)
         from infrastructure.queue.dispatcher import enqueue_process_execution
 
         celery_task_id = enqueue_process_execution(process_id)
@@ -254,44 +251,22 @@ async def _watchdog_dead_processes() -> dict[str, Any]:
             celery_task_id=celery_task_id,
         )
 
-    for process_id in _active_marker_process_ids(redis_client):
-        if process_id in requeued:
-            continue
-        process = await mongodb_service.get_process_upload(process_id)
-        status = str((process or {}).get("status") or "").strip().lower()
-        if status in {"running", "acquiring_browser", "recovering", "stop_requested"}:
-            continue
-        if decrement_active_if_marked(redis_client, process_id):
-            cleaned_active_markers.append(process_id)
-
     log_event(
         logger,
         "info",
-        "watchdog_dead_processes_completed checked=%s dead=%s cleaned_active_markers=%s",
+        "watchdog_dead_processes_completed checked=%s dead=%s",
         len(running_processes),
         len(requeued),
-        len(cleaned_active_markers),
         domain="watchdog",
         checked=len(running_processes),
         dead_workers_found=len(requeued),
-        cleaned_active_marker_count=len(cleaned_active_markers),
     )
     return {
         "enabled": True,
         "checked": len(running_processes),
         "dead_workers_found": len(requeued),
         "requeued": requeued,
-        "cleaned_active_markers": cleaned_active_markers,
     }
-
-
-def _active_marker_process_ids(redis_client: Redis) -> list[str]:
-    settings = get_settings()
-    prefix = f"{settings.redis_active_process_marker_prefix}:"
-    return [
-        str(key).removeprefix(prefix)
-        for key in redis_client.scan_iter(f"{prefix}*")
-    ]
 
 
 async def _mark_process_failed(process_id: str, error: str, task_id: str | None) -> None:

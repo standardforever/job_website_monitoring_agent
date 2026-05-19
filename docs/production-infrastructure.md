@@ -6,9 +6,8 @@ This deployment separates the system into five responsibilities:
 - `redis`: broker and result backend for Celery.
 - `worker`: Celery worker that executes queued process tasks.
 - `selenium-hub`: receives WebDriver sessions from workers.
-- `chrome-node`: scalable Chromium browser capacity registered with Selenium Hub.
+- `chrome-node`: fixed Chromium browser capacity registered with Selenium Hub.
 - `mongo`: durable process state, client configuration, and run history.
-- `autoscaler`: optional resource-aware service that scales workers and Chrome nodes.
 
 ## Why This Scales Better
 
@@ -17,9 +16,9 @@ It creates the process record in MongoDB, then enqueues the process id into Redi
 
 This means:
 
-- API replicas can scale independently from workers.
-- Worker count controls how many processes can run concurrently.
-- Chrome node count controls browser capacity.
+- API replicas can run independently from workers.
+- Fixed worker replicas control how many processes can run concurrently.
+- Fixed Chrome node replicas control browser capacity.
 - Redis handles task delivery and worker scheduling.
 - MongoDB remains the source of truth for process status, results, stop requests, and history.
 - The queue layer is isolated under `source/infrastructure/queue`, so it can be replaced without changing the pipeline internals.
@@ -105,33 +104,13 @@ Start the stack:
 docker compose up -d --build
 ```
 
-Scale workers and browser nodes:
+Choose fixed workers and browser nodes:
 
 ```bash
 docker compose up -d --scale worker=4 --scale chrome-node=8
 ```
 
-Enable autoscaling:
-
-```bash
-docker compose --profile autoscale up -d --build autoscaler
-```
-
-The autoscaler watches:
-
-- Redis queue depth
-- Mongo queued/running processes
-- Selenium used/total browser slots
-- server CPU and available RAM
-- current Docker Compose worker/chrome-node counts
-
-It scales up with:
-
-```bash
-docker compose up -d --scale worker=N --scale chrome-node=M
-```
-
-It scales down only after the queue is empty, Mongo has no running process, Selenium has no active browser slots, and the idle cooldown has passed.
+There is no autoscaler in this deployment. Extra work stays in Redis until a worker is free.
 
 If you need the older Mongo polling worker for debugging, it is still available behind a profile:
 

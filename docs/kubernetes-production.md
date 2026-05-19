@@ -10,7 +10,7 @@ User
   -> API pods
   -> MongoDB source of truth
   -> Redis queue
-  -> KEDA scales Celery workers
+  -> Fixed Celery worker pods pick queued work
   -> Workers request browser sessions from Selenium Hub
   -> Selenium Hub assigns Chrome node pods
   -> Workers write results to MongoDB and send email
@@ -22,18 +22,9 @@ MongoDB is the source of truth. Redis is only the queue transport. Selenium only
 
 - Kubernetes cluster
 - Ingress controller, such as nginx ingress
-- KEDA installed
 - Container registry access
 - Persistent storage class
 - Optional but recommended: managed MongoDB and managed Redis
-
-Install KEDA:
-
-```bash
-helm repo add kedacore https://kedacore.github.io/charts
-helm repo update
-helm install keda kedacore/keda --namespace keda --create-namespace
-```
 
 ## Build And Push Image
 
@@ -80,7 +71,6 @@ Check pods:
 kubectl -n job-monitoring get pods
 kubectl -n job-monitoring get svc
 kubectl -n job-monitoring get hpa
-kubectl -n job-monitoring get scaledobject
 ```
 
 Watch logs:
@@ -91,31 +81,21 @@ kubectl -n job-monitoring logs deploy/worker -f
 kubectl -n job-monitoring logs deploy/selenium-hub -f
 ```
 
-## Autoscaling
+## Fixed Queue Processing
 
-KEDA scales Celery workers using Redis queue depth:
-
-```text
-Redis processes list grows -> worker pods scale up
-Redis processes list drains -> worker pods scale down after cooldown
-```
-
-The production default intentionally does not enable queue-based Chrome node autoscaling.
-
-Reason:
+This deployment does not autoscale. Redis queues excess work and fixed worker pods process it one job at a time:
 
 ```text
-Queue depth can be 0 while Chrome sessions are still active.
-Scaling Chrome down only from queue depth can kill active browser sessions.
+Redis queue grows -> workers keep processing at fixed concurrency
+Redis queue drains -> workers stay ready for the next process
 ```
 
-For now, set Chrome node capacity manually:
+Set worker and Chrome capacity manually:
 
 ```bash
+kubectl -n job-monitoring scale deploy/worker --replicas=4
 kubectl -n job-monitoring scale deploy/chrome-node --replicas=4
 ```
-
-When you are ready for browser autoscaling, use a Selenium Grid session metric or a drain-aware Chrome node workflow.
 
 ## Capacity Rule Of Thumb
 
@@ -130,10 +110,9 @@ worker pods <= chrome-node pods
 Example:
 
 ```bash
+kubectl -n job-monitoring scale deploy/worker --replicas=4
 kubectl -n job-monitoring scale deploy/chrome-node --replicas=4
 ```
-
-Then let KEDA scale workers between 1 and 20.
 
 ## Production Notes
 
