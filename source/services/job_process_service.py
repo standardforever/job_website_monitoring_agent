@@ -8,6 +8,7 @@ from browser.session_manager import BrowserSessionManager
 from core.config import get_settings
 from models.process import JobProcessRequest
 from pipeline.domain_processor import DomainProcessor
+from pipeline.exceptions import BrowserCapacityUnavailable
 from pipeline.process_executor import ProcessExecutor
 from pipeline.process_summary import empty_summary
 from services.client_service import ClientService
@@ -80,17 +81,43 @@ class JobProcessService:
         submitted = await self.submit_process(request.model_copy(update={"task_id": process_id or request.task_id}))
         return await self.execute_process(submitted["process_id"])
 
-    async def execute_existing_process(self, process_id: str) -> dict[str, Any]:
-        return await self.execute_process(process_id)
-
-    async def execute_rerun_process(self, process_id: str) -> dict[str, Any]:
-        return await self.execute_process(process_id)
-
     async def execute_process(self, process_id: str) -> dict[str, Any]:
         result = await self._executor.execute(process_id)
         self._stop_requests.discard(process_id)
         await self._send_process_completion_email(process_id, result["status"])
         return result
+
+    async def claim_process_for_execution(self, process_id: str, worker_id: str | None = None) -> dict[str, Any] | None:
+        return await self._mongodb_service.begin_process_execution(process_id, worker_id)
+
+    async def skipped_or_invalid_process(self, process_id: str) -> dict[str, Any]:
+        return await self._executor.skipped_or_invalid_process(process_id)
+
+    async def acquire_browser_for_process(self, process: dict[str, Any]) -> tuple[dict[str, Any], Any]:
+        process_id = str(process["process_id"])
+        grid_url = str(self._settings.selenium_remote_url or "").strip() or None
+        browser_runtime = await self._browser_manager.create_process_session(grid_url)
+        if browser_runtime is None:
+            retry_delay = self._settings.browser_session_retry_delay_seconds
+            error = "Browser capacity is not available yet"
+            await self._mongodb_service.release_process_for_browser_retry(process_id, error, retry_delay)
+            raise BrowserCapacityUnavailable(error)
+
+        running_process = await self._mongodb_service.mark_process_running(process_id)
+        if running_process is None:
+            await self._browser_manager.close_process_session(browser_runtime)
+            raise BrowserCapacityUnavailable("Process changed state before browser acquisition completed")
+        return running_process, browser_runtime
+
+    async def execute_process_with_browser(self, process: dict[str, Any], browser_runtime: Any) -> dict[str, Any]:
+        result = await self._executor.execute_with_browser(process, browser_runtime)
+        process_id = str(process["process_id"])
+        self._stop_requests.discard(process_id)
+        await self._send_process_completion_email(process_id, result["status"])
+        return result
+
+    async def close_process_browser_session(self, browser_runtime: Any) -> None:
+        await self._browser_manager.close_process_session(browser_runtime)
 
     async def submit_rerun_process(self, process_id: str) -> dict[str, Any]:
         process = await self._mongodb_service.get_process_with_domains(process_id)
@@ -237,7 +264,6 @@ def build_process_document(
             "upload_filename": upload_filename,
             "supplied_career_page_count": sum(1 for domain in domains if domain.get("career_page_url")),
             "client_model": client.get("model") or "gpt-5-nano",
-            "client_grid_url": client.get("grid_url"),
         },
         "history": [],
         "created_at": now,
@@ -283,14 +309,35 @@ def build_domain_run_documents(process_id: str, client: dict[str, Any], domains:
 
 def allocate_domains_to_agents(domains: list[dict[str, Any]], agent_count: int) -> list[dict[str, Any]]:
     normalized_agent_count = max(1, min(int(agent_count or 1), len(domains) or 1))
-    assignments = [{"agent_index": index, "domains": [], "status": "queued"} for index in range(normalized_agent_count)]
+    assignments = [
+        {
+            "agent_index": index,
+            "domains": [],
+            "processed_domain": [],
+            "pending_domain": [],
+            "failed_domain": [],
+            "status": "queued",
+        }
+        for index in range(normalized_agent_count)
+    ]
     for index, domain in enumerate(domains):
-        assignments[index % normalized_agent_count]["domains"].append(domain)
+        assignment = assignments[index % normalized_agent_count]
+        assignment["domains"].append(domain)
+        assignment["pending_domain"].append(_assignment_domain_ref(domain))
     return [
         assignment
         for assignment in assignments
         if assignment["domains"]
     ]
+
+
+def _assignment_domain_ref(domain: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "input_index": domain.get("input_index"),
+        "domain": domain.get("domain"),
+        "domain_key": domain.get("domain_key"),
+        "career_page_url": domain.get("career_page_url"),
+    }
 
 
 def paginated_processes(processes: list[dict[str, Any]], total: int, page: int, page_size: int) -> dict[str, Any]:

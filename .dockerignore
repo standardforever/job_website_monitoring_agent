@@ -9,6 +9,7 @@ __pycache__
 .mypy_cache
 
 logs
+*.log
 mongo-data
 chrome-profile
 
@@ -19,3 +20,18 @@ source/.env
 node_modules
 dist
 build
+
+docs
+infra
+.gitignore
+docker-compose*.yaml
+Dockerfile.autoscaler
+.env.production.example
+chrome-profile
+logs
+monogo-data
+my-env
+redis-data
+
+# Local/debug files that are not application modules.
+source/job_process_*.py

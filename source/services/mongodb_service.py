@@ -516,6 +516,95 @@ class MongoDBService:
     async def recover_interrupted_processes(self, *, stale_after_seconds: int) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._recover_interrupted_processes_sync, stale_after_seconds)
 
+    async def list_running_processes(self) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._list_running_processes_sync)
+
+    def _list_running_processes_sync(self) -> list[dict[str, Any]]:
+        return list(
+            self._get_collection("process_uploads").find(
+                {"status": "running"},
+                {"_id": 0, "process_id": 1, "status": 1, "metadata.worker_id": 1, "updated_at": 1},
+            )
+        )
+
+    async def recover_process_missing_heartbeat(self, process_id: str) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._recover_process_missing_heartbeat_sync, process_id)
+
+    async def recover_process_lost_browser(self, process_id: str, error: str) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._recover_process_lost_browser_sync, process_id, error)
+
+    def _recover_process_lost_browser_sync(self, process_id: str, error: str) -> dict[str, Any] | None:
+        now = datetime.utcnow()
+        process = self._get_collection("process_uploads").find_one_and_update(
+            {"process_id": process_id, "status": "running"},
+            {
+                "$set": {
+                    "status": "recovering",
+                    "updated_at": now,
+                    "metadata.recovery_claimed_at": now,
+                    "metadata.recovery_previous_status": "running",
+                    "metadata.recovery_reason": "browser_session_lost",
+                    "metadata.last_browser_session_error": error,
+                }
+            },
+            projection={"_id": 0},
+            return_document=ReturnDocument.BEFORE,
+        )
+        if process is None:
+            return None
+        recovered = self._recover_stale_running_process(process, now)
+        self._get_collection("process_uploads").update_one(
+            {"process_id": process_id},
+            {
+                "$set": {
+                    "metadata.recovery_reason": "browser_session_lost",
+                    "metadata.recovered_after_browser_loss": True,
+                    "metadata.last_browser_session_error": error,
+                }
+            },
+        )
+        log_event(
+            logger,
+            "warning",
+            "mongodb_recover_process_lost_browser process_id=%s error=%s",
+            process_id,
+            error,
+            domain="mongodb",
+            process_id=process_id,
+            error=error,
+        )
+        return recovered
+
+    def _recover_process_missing_heartbeat_sync(self, process_id: str) -> dict[str, Any] | None:
+        now = datetime.utcnow()
+        process = self._get_collection("process_uploads").find_one_and_update(
+            {"process_id": process_id, "status": "running"},
+            {
+                "$set": {
+                    "status": "recovering",
+                    "updated_at": now,
+                    "metadata.recovery_claimed_at": now,
+                    "metadata.recovery_previous_status": "running",
+                    "metadata.recovery_reason": "missing_redis_heartbeat",
+                }
+            },
+            projection={"_id": 0},
+            return_document=ReturnDocument.BEFORE,
+        )
+        if process is None:
+            return None
+        recovered = self._recover_stale_running_process(process, now)
+        self._get_collection("process_uploads").update_one(
+            {"process_id": process_id},
+            {
+                "$set": {
+                    "metadata.recovery_reason": "missing_redis_heartbeat",
+                    "metadata.recovered_by_watchdog": True,
+                }
+            },
+        )
+        return recovered
+
     def _recover_interrupted_processes_sync(self, stale_after_seconds: int) -> list[dict[str, Any]]:
         now = datetime.utcnow()
         stale_before = now - timedelta(seconds=max(1, int(stale_after_seconds)))
@@ -724,8 +813,7 @@ class MongoDBService:
             },
         )
         assignments = list(process.get("assignments") or [])
-        for assignment in assignments:
-            assignment["status"] = "queued"
+        self._rebuild_assignment_progress_from_domain_runs(process_id, assignments)
         self._get_collection("process_uploads").update_one(
             {"process_id": process_id},
             {
@@ -759,8 +847,7 @@ class MongoDBService:
             return None
 
         assignments = list(process.get("assignments") or [])
-        for assignment in assignments:
-            assignment["status"] = "queued"
+        self._reset_assignment_progress_for_rerun(assignments)
 
         history_item = {
             "run_at": process.get("completed_at") or process.get("updated_at") or now,
@@ -844,6 +931,37 @@ class MongoDBService:
             "new_job_count": 0,
         }
 
+    def _reset_assignment_progress_for_rerun(self, assignments: list[dict[str, Any]]) -> None:
+        for assignment in assignments:
+            assignment["status"] = "queued"
+            assignment["processed_domain"] = []
+            assignment["failed_domain"] = []
+            assignment["pending_domain"] = [
+                self._assignment_domain_ref(domain)
+                for domain in list(assignment.get("domains") or [])
+            ]
+
+    def _rebuild_assignment_progress_from_domain_runs(self, process_id: str, assignments: list[dict[str, Any]]) -> None:
+        runs = list(self._get_collection("domain_runs").find({"process_id": process_id}, {"_id": 0}))
+        run_statuses = {
+            (item.get("input_index"), item.get("domain_key"), item.get("career_page_url")): item.get("status")
+            for item in runs
+        }
+        for assignment in assignments:
+            assignment["status"] = "queued"
+            assignment["processed_domain"] = []
+            assignment["pending_domain"] = []
+            assignment["failed_domain"] = []
+            for domain in list(assignment.get("domains") or []):
+                ref = self._assignment_domain_ref(domain)
+                status = run_statuses.get((ref.get("input_index"), ref.get("domain_key"), ref.get("career_page_url")))
+                if status == "completed":
+                    assignment["processed_domain"].append(ref)
+                elif status == "failed":
+                    assignment["failed_domain"].append(ref)
+                else:
+                    assignment["pending_domain"].append(ref)
+
     def _domain_run_history_item(self, item: dict[str, Any], fallback_time: datetime) -> dict[str, Any] | None:
         if not item.get("result_summary") and not item.get("result_payload") and not item.get("error"):
             return None
@@ -863,6 +981,107 @@ class MongoDBService:
         self._get_collection("process_uploads").update_one(
             {"process_id": process_id, "assignments.agent_index": agent_index},
             {"$set": {"assignments.$.status": status, "updated_at": datetime.utcnow()}},
+        )
+
+    async def update_assignment_domain_progress(
+        self,
+        process_id: str,
+        agent_index: int,
+        domain: dict[str, Any],
+        status: str,
+    ) -> None:
+        await asyncio.to_thread(self._update_assignment_domain_progress_sync, process_id, agent_index, domain, status)
+
+    async def rebuild_assignment_progress(self, process_id: str) -> None:
+        await asyncio.to_thread(self._rebuild_assignment_progress_sync, process_id)
+
+    def _rebuild_assignment_progress_sync(self, process_id: str) -> None:
+        process = self._get_collection("process_uploads").find_one({"process_id": process_id}, {"_id": 0, "assignments": 1})
+        if not process:
+            return
+        assignments = list(process.get("assignments") or [])
+        self._rebuild_assignment_progress_from_domain_runs(process_id, assignments)
+        self._get_collection("process_uploads").update_one(
+            {"process_id": process_id},
+            {"$set": {"assignments": assignments, "updated_at": datetime.utcnow()}},
+        )
+
+    def _update_assignment_domain_progress_sync(
+        self,
+        process_id: str,
+        agent_index: int,
+        domain: dict[str, Any],
+        status: str,
+    ) -> None:
+        process = self._get_collection("process_uploads").find_one(
+            {"process_id": process_id, "assignments.agent_index": agent_index},
+            {"_id": 0, "assignments": 1},
+        )
+        if not process:
+            return
+
+        assignments = list(process.get("assignments") or [])
+        changed = False
+        for assignment in assignments:
+            if int(assignment.get("agent_index", -1)) != int(agent_index):
+                continue
+            self._ensure_assignment_progress_fields(assignment)
+            domain_ref = self._assignment_domain_ref(domain)
+            self._remove_assignment_domain_ref(assignment["pending_domain"], domain_ref)
+            self._remove_assignment_domain_ref(assignment["processed_domain"], domain_ref)
+            self._remove_assignment_domain_ref(assignment["failed_domain"], domain_ref)
+            if status == "completed":
+                assignment["processed_domain"].append(domain_ref)
+            elif status == "failed":
+                assignment["failed_domain"].append(domain_ref)
+            else:
+                assignment["pending_domain"].append(domain_ref)
+            changed = True
+            break
+
+        if changed:
+            self._get_collection("process_uploads").update_one(
+                {"process_id": process_id},
+                {"$set": {"assignments": assignments, "updated_at": datetime.utcnow()}},
+            )
+
+    def _ensure_assignment_progress_fields(self, assignment: dict[str, Any]) -> None:
+        assignment.setdefault("processed_domain", [])
+        assignment.setdefault("failed_domain", [])
+        if "pending_domain" not in assignment:
+            assignment["pending_domain"] = [
+                self._assignment_domain_ref(domain)
+                for domain in list(assignment.get("domains") or [])
+                if not self._assignment_domain_ref_exists(assignment["processed_domain"], domain)
+                and not self._assignment_domain_ref_exists(assignment["failed_domain"], domain)
+            ]
+
+    def _assignment_domain_ref(self, domain: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "input_index": domain.get("input_index"),
+            "domain": domain.get("domain"),
+            "domain_key": domain.get("domain_key"),
+            "career_page_url": domain.get("career_page_url"),
+        }
+
+    def _assignment_domain_ref_exists(self, values: list[dict[str, Any]], domain: dict[str, Any]) -> bool:
+        ref = self._assignment_domain_ref(domain)
+        return any(self._assignment_domain_refs_match(item, ref) for item in values)
+
+    def _remove_assignment_domain_ref(self, values: list[dict[str, Any]], ref: dict[str, Any]) -> None:
+        values[:] = [item for item in values if not self._assignment_domain_refs_match(item, ref)]
+
+    def _assignment_domain_refs_match(self, left: dict[str, Any], right: dict[str, Any]) -> bool:
+        if not isinstance(left, dict) or not isinstance(right, dict):
+            return False
+        return (
+            left.get("input_index"),
+            left.get("domain_key"),
+            left.get("career_page_url"),
+        ) == (
+            right.get("input_index"),
+            right.get("domain_key"),
+            right.get("career_page_url"),
         )
 
     async def mark_domain_running(self, process_id: str, domain_key: str, career_page_url: str | None, agent_index: int) -> None:

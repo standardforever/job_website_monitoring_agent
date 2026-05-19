@@ -215,3 +215,4 @@ mongo-data/
 .env
 source/.env
 redis-data/
+infra

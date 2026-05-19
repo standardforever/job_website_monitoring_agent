@@ -349,7 +349,7 @@ async def attach_playwright_to_cdp(cdp_url: str) -> BrowserSession | None:
         return None
 
 
-async def close_agent_tab(session: BrowserSession | None) -> None:
+async def close_browser_attachment(session: BrowserSession | None) -> None:
     if session is None:
         return
 
@@ -364,22 +364,6 @@ async def close_agent_tab(session: BrowserSession | None) -> None:
                 domain=session.cdp_url,
                 session_id=session.session_id,
             )
-    except Exception:
-        pass
-
-
-async def close_browser_attachment(session: BrowserSession | None) -> None:
-    if session is None:
-        return
-
-    try:
-        if not session.page.is_closed():
-            await session.page.close()
-    except Exception:
-        pass
-
-    try:
-        await session.browser.close()
     except Exception:
         pass
 

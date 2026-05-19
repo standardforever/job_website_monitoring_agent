@@ -3,12 +3,12 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from browser.session_manager import AgentSessionRecoveryNeeded, BrowserSessionManager, SharedSessionRuntime
+from core.config import get_settings
 from models.process import DomainProcessRecord, WorkerProcessResult
-from nodes.session_bootstrap import bootstrap_browser_node
 from pipeline.domain_processor import DomainProcessor
 from pipeline.process_summary import derive_completion_status
 from services.flow_safety import extract_domain
-from services.grid_session import close_agent_tab
+from services.grid_session import close_browser_attachment
 from services.mongodb_service import MongoDBService
 
 
@@ -38,51 +38,15 @@ class AgentWorker:
             await self._stop_remaining(process_id, assigned_domains)
             return self._result(agent_index, "stopped", assigned_domains, [], [], {"stop_requested": True})
 
-        try:
-            browser_session, agent_tab, metadata = await self._bootstrap(graph_input, runtime, assigned_domains)
-        except Exception as exc:
-            return await self._bootstrap_failed(process_id, agent_index, assigned_domains, str(exc))
-
-        try:
-            domain_results, errors, processed = await self._process_domains(
-                process_id=process_id,
-                agent_index=agent_index,
-                assigned_domains=assigned_domains,
-                browser_session=browser_session,
-                agent_tab=agent_tab,
-                runtime=runtime,
-            )
-            stop_requested = await self._stop_requested_now(process_id)
-            return self._worker_result(agent_index, assigned_domains, processed, domain_results, errors, metadata, stop_requested)
-        finally:
-            await self._finish_agent(process_id, agent_index, assigned_domains, browser_session)
-
-    async def _bootstrap(
-        self,
-        graph_input: dict[str, Any],
-        runtime: SharedSessionRuntime,
-        assigned_domains: list[dict[str, Any]],
-    ) -> tuple[Any, dict[str, Any], dict[str, Any]]:
-        bootstrap_result = await bootstrap_browser_node(
-            state={
-                "process_id": graph_input["process_id"],
-                "agent_index": graph_input["agent_index"],
-                "assigned_urls": [domain["domain"] for domain in assigned_domains],
-                "session_id": graph_input.get("session_id"),
-                "cdp_url": graph_input.get("cdp_url"),
-                "metadata": {},
-            }
-        )
-        if bootstrap_result.get("session_established"):
-            return bootstrap_result.get("browser_session"), bootstrap_result.get("agent_tab", {}), dict(bootstrap_result.get("metadata") or {})
-
-        browser_session, agent_tab = await self._browser_manager.recover_agent_tab(
+        domain_results, errors, processed = await self._process_domains(
+            process_id=process_id,
+            agent_index=agent_index,
+            assigned_domains=assigned_domains,
             runtime=runtime,
-            browser_session=None,
-            agent_index=int(graph_input["agent_index"]),
-            url=assigned_domains[0]["domain"] if assigned_domains else str(graph_input["process_id"]),
         )
-        return browser_session, agent_tab, {**dict(bootstrap_result.get("metadata") or {}), "bootstrap_status": "recovered"}
+        stop_requested = await self._stop_requested_now(process_id)
+        await self._finish_agent(process_id, agent_index, assigned_domains)
+        return self._worker_result(agent_index, assigned_domains, processed, domain_results, errors, {}, stop_requested)
 
     async def _process_domains(
         self,
@@ -90,8 +54,6 @@ class AgentWorker:
         process_id: str,
         agent_index: int,
         assigned_domains: list[dict[str, Any]],
-        browser_session: Any,
-        agent_tab: dict[str, Any],
         runtime: SharedSessionRuntime,
     ) -> tuple[list[dict[str, Any]], list[str], list[str]]:
         domain_results: list[dict[str, Any]] = []
@@ -105,9 +67,8 @@ class AgentWorker:
                     [pending for pending in assigned_domains if self._domain_run_key(pending) not in processed_keys],
                 )
                 break
-            record, browser_session, agent_tab = await self._process_with_recovery(
-                process_id, domain, browser_session, agent_index, agent_tab, runtime
-            )
+            record = await self._process_with_recovery(process_id, domain, agent_index, runtime)
+            await self._record_assignment_domain_progress(process_id, agent_index, domain, record)
             domain_results.append(record)
             processed.append(domain["domain_key"])
             processed_keys.add(self._domain_run_key(domain))
@@ -122,31 +83,56 @@ class AgentWorker:
         self,
         process_id: str,
         domain: dict[str, Any],
-        browser_session: Any,
         agent_index: int,
-        agent_tab: dict[str, Any],
         runtime: SharedSessionRuntime,
-    ) -> tuple[dict[str, Any], Any, dict[str, Any]]:
+    ) -> dict[str, Any]:
         for attempt in range(3):
+            browser_session = None
             try:
-                record = await self._domain_processor.process(
-                    process_id=process_id,
-                    domain=domain,
-                    browser_session=browser_session,
-                    agent_index=agent_index,
-                    agent_tab=agent_tab,
-                )
-                return record, browser_session, agent_tab
-            except AgentSessionRecoveryNeeded as exc:
-                if attempt == 2:
-                    return await self._mark_recovery_failed(process_id, domain, str(exc)), browser_session, agent_tab
-                browser_session, agent_tab = await self._browser_manager.recover_agent_tab(
+                browser_session, agent_tab = await self._browser_manager.open_agent_tab(
                     runtime=runtime,
-                    browser_session=browser_session,
                     agent_index=agent_index,
                     url=domain["domain"],
                 )
-        return await self._mark_recovery_failed(process_id, domain, "Agent recovery failed"), browser_session, agent_tab
+                record = await self._process_domain_with_timeout(
+                    process_id,
+                    domain,
+                    browser_session,
+                    agent_index,
+                    agent_tab,
+                )
+                return record
+            except AgentSessionRecoveryNeeded as exc:
+                if attempt == 2:
+                    return await self._mark_recovery_failed(process_id, domain, str(exc))
+            except Exception as exc:
+                if attempt == 2:
+                    return await self._mark_recovery_failed(process_id, domain, str(exc))
+            finally:
+                await close_browser_attachment(browser_session)
+        return await self._mark_recovery_failed(process_id, domain, "Agent recovery failed")
+
+    async def _process_domain_with_timeout(
+        self,
+        process_id: str,
+        domain: dict[str, Any],
+        browser_session: Any,
+        agent_index: int,
+        agent_tab: dict[str, Any],
+    ) -> dict[str, Any]:
+        import asyncio
+
+        timeout_seconds = max(60, int(get_settings().domain_process_timeout_seconds))
+        return await asyncio.wait_for(
+            self._domain_processor.process(
+                process_id=process_id,
+                domain=domain,
+                browser_session=browser_session,
+                agent_index=agent_index,
+                agent_tab=agent_tab,
+            ),
+            timeout=timeout_seconds,
+        )
 
     async def _mark_recovery_failed(self, process_id: str, domain: dict[str, Any], error_text: str) -> dict[str, Any]:
         record = DomainProcessRecord(
@@ -164,32 +150,10 @@ class AgentWorker:
         )
         return record
 
-    async def _bootstrap_failed(
-        self,
-        process_id: str,
-        agent_index: int,
-        assigned_domains: list[dict[str, Any]],
-        error_text: str,
-    ) -> dict[str, Any]:
-        records = []
-        for domain in assigned_domains:
-            records.append(await self._mark_recovery_failed(process_id, domain, error_text or "Agent bootstrap failed"))
-        await self._mongodb_service.update_assignment_status(process_id, agent_index, "completed")
-        return self._result(
-            agent_index,
-            "failed",
-            assigned_domains,
-            [],
-            records,
-            {"bootstrap_status": "failed"},
-            [error_text],
-        )
-
-    async def _finish_agent(self, process_id: str, agent_index: int, domains: list[dict[str, Any]], browser_session: Any) -> None:
+    async def _finish_agent(self, process_id: str, agent_index: int, domains: list[dict[str, Any]]) -> None:
         if domains:
             status = "stopped" if await self._stop_requested_now(process_id) else "completed"
             await self._mongodb_service.update_assignment_status(process_id, agent_index, status)
-        await close_agent_tab(browser_session)
 
     async def _stop_requested_now(self, process_id: str) -> bool:
         if self._stop_requested(process_id):
@@ -202,6 +166,18 @@ class AgentWorker:
             process_id,
             [{"domain_key": domain.get("domain_key"), "career_page_url": domain.get("career_page_url")} for domain in domains],
         )
+
+    async def _record_assignment_domain_progress(
+        self,
+        process_id: str,
+        agent_index: int,
+        domain: dict[str, Any],
+        record: dict[str, Any],
+    ) -> None:
+        status = str(record.get("status") or "").strip().lower()
+        if status not in {"completed", "failed"}:
+            return
+        await self._mongodb_service.update_assignment_domain_progress(process_id, agent_index, domain, status)
 
     def _worker_result(
         self,

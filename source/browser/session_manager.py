@@ -74,27 +74,33 @@ class BrowserSessionManager:
     async def close_process_session(self, runtime: SharedSessionRuntime | None) -> None:
         if runtime is None:
             return
+        log_event(
+            logger,
+            "info",
+            "process_browser_session_close_started session_id=%s",
+            runtime.session_id,
+            domain=runtime.grid_url or "grid",
+            session_id=runtime.session_id,
+        )
         await close_shared_session_async(runtime.session_id)
 
-    async def recover_agent_tab(
+    async def open_agent_tab(
         self,
         *,
         runtime: SharedSessionRuntime,
-        browser_session: Any,
         agent_index: int,
         url: str,
     ) -> tuple[Any, dict[str, Any]]:
         async with runtime.recovery_lock:
             await self._refresh_runtime_if_needed(runtime)
-            await close_browser_attachment(browser_session)
-            rebuilt_session = await attach_playwright_to_cdp(runtime.cdp_url)
-            if rebuilt_session is None:
-                raise RuntimeError("Failed to reattach Playwright during agent recovery")
-            rebuilt_tab = await ensure_agent_tab(rebuilt_session, agent_index=agent_index)
+            session = await attach_playwright_to_cdp(runtime.cdp_url)
+            if session is None:
+                raise RuntimeError("Failed to attach Playwright for domain tab")
+            tab = await ensure_agent_tab(session, agent_index=agent_index)
             log_event(
                 logger,
                 "info",
-                "agent_tab_recovery_completed agent_index=%s session_id=%s url=%s",
+                "agent_tab_opened agent_index=%s session_id=%s url=%s",
                 agent_index,
                 runtime.session_id,
                 url,
@@ -102,7 +108,7 @@ class BrowserSessionManager:
                 agent_index=agent_index,
                 session_id=runtime.session_id,
             )
-            return rebuilt_session, rebuilt_tab
+            return session, tab
 
     async def _refresh_runtime_if_needed(self, runtime: SharedSessionRuntime) -> None:
         if await is_grid_session_active_async(runtime.grid_url, runtime.session_id):

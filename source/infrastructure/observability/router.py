@@ -38,7 +38,6 @@ async def observability_alerts(x_registration_password: str | None = Header(defa
 
 @router.get("/metrics", response_class=PlainTextResponse)
 async def observability_metrics(x_registration_password: str | None = Header(default=None)) -> PlainTextResponse:
-    _validate_observability_access(x_registration_password)
     return PlainTextResponse(
         collector.prometheus_metrics(),
         media_type="text/plain; version=0.0.4",

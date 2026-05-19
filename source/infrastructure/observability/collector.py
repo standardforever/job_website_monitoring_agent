@@ -85,10 +85,22 @@ class ObservabilityCollector:
 
             client = Redis.from_url(self._settings.celery_broker_url, decode_responses=True)
             depth = int(client.llen(self._settings.observability_redis_queue))
-            return {"queue_name": self._settings.observability_redis_queue, "depth": depth, "available": True}
+            active_jobs = int(client.get(self._settings.redis_active_process_counter_key) or 0)
+            return {
+                "queue_name": self._settings.observability_redis_queue,
+                "depth": depth,
+                "active_jobs": active_jobs,
+                "available": True,
+            }
         except Exception as exc:
             log_event(logger, "warning", "observability_queue_unavailable error=%s", str(exc), domain="observability")
-            return {"queue_name": self._settings.observability_redis_queue, "depth": 0, "available": False, "error": str(exc)}
+            return {
+                "queue_name": self._settings.observability_redis_queue,
+                "depth": 0,
+                "active_jobs": 0,
+                "available": False,
+                "error": str(exc),
+            }
 
     def _browser_metrics(self) -> dict[str, Any]:
         try:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 from kombu.exceptions import OperationalError
+from core.config import get_settings
 from utils.logging import get_logger, log_event
 
 logger = get_logger("queue_dispatcher")
@@ -11,7 +12,7 @@ def enqueue_process_execution(process_id: str) -> str:
     try:
         from infrastructure.queue.process_tasks import execute_process
 
-        task = execute_process.delay(process_id)
+        task = execute_process.apply_async(args=[process_id], queue=get_settings().celery_task_queue)
         log_event(
             logger,
             "info",

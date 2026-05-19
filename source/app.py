@@ -35,6 +35,11 @@ log_event(
 )
 
 
+@app.get("/health", include_in_schema=False)
+async def root_healthcheck() -> dict[str, str]:
+    return {"status": "ok"}
+
+
 @app.on_event("startup")
 async def ensure_mongodb_indexes() -> None:
     global recovery_task

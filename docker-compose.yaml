@@ -9,6 +9,7 @@ services:
       PROCESS_EXECUTION_MODE: celery
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CELERY_TASK_QUEUE: ${CELERY_TASK_QUEUE:-processes}
       SELENIUM_REMOTE_URL: http://selenium-hub:4444/wd/hub
       MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
       MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
@@ -38,6 +39,7 @@ services:
         "worker",
         "--loglevel=INFO",
         "--concurrency=${CELERY_WORKER_CONCURRENCY:-1}",
+        "--queues=${CELERY_TASK_QUEUE:-processes}",
         "--hostname=worker@%h",
       ]
     env_file:
@@ -46,6 +48,14 @@ services:
       PROCESS_EXECUTION_MODE: celery
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CELERY_TASK_QUEUE: ${CELERY_TASK_QUEUE:-processes}
+      REDIS_PROCESS_HEARTBEAT_TTL_SECONDS: ${REDIS_PROCESS_HEARTBEAT_TTL_SECONDS:-7200}
+      REDIS_PROCESS_HEARTBEAT_INTERVAL_SECONDS: ${REDIS_PROCESS_HEARTBEAT_INTERVAL_SECONDS:-3600}
+      REDIS_PROCESS_HEARTBEAT_PREFIX: ${REDIS_PROCESS_HEARTBEAT_PREFIX:-heartbeat}
+      REDIS_ACTIVE_PROCESS_COUNTER_KEY: ${REDIS_ACTIVE_PROCESS_COUNTER_KEY:-active_agent_jobs}
+      REDIS_ACTIVE_PROCESS_MARKER_PREFIX: ${REDIS_ACTIVE_PROCESS_MARKER_PREFIX:-active_agent_job}
+      WATCHDOG_ENABLED: ${WATCHDOG_ENABLED:-true}
+      WATCHDOG_INTERVAL_SECONDS: ${WATCHDOG_INTERVAL_SECONDS:-1800}
       WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-3}
       SELENIUM_REMOTE_URL: http://selenium-hub:4444/wd/hub
       MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
@@ -61,6 +71,40 @@ services:
       selenium-hub:
         condition: service_started
       chrome-node:
+        condition: service_started
+    restart: unless-stopped
+
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      [
+        "celery",
+        "-A",
+        "infrastructure.queue.celery_app:celery_app",
+        "beat",
+        "--loglevel=INFO",
+        "--schedule=/tmp/celerybeat-schedule",
+      ]
+    env_file:
+      - ./source/.env
+    environment:
+      PROCESS_EXECUTION_MODE: celery
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CELERY_TASK_QUEUE: ${CELERY_TASK_QUEUE:-processes}
+      WATCHDOG_ENABLED: ${WATCHDOG_ENABLED:-true}
+      WATCHDOG_INTERVAL_SECONDS: ${WATCHDOG_INTERVAL_SECONDS:-1800}
+      MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
+      MONGODB_CLIENTS_COLLECTION: clients
+      MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
+      MONGODB_DOMAIN_RUNS_COLLECTION: domain_runs
+    depends_on:
+      mongo:
+        condition: service_started
+      redis:
         condition: service_started
     restart: unless-stopped
 
@@ -102,7 +146,7 @@ services:
     environment:
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-job_website_monitoring_agent}
       AUTOSCALER_REDIS_URL: redis://redis:6379/0
-      AUTOSCALER_REDIS_QUEUE: processes
+      AUTOSCALER_REDIS_QUEUE: ${CELERY_TASK_QUEUE:-processes}
       AUTOSCALER_COMPOSE_PROJECT_DIR: ${PWD}
       MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
       MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
@@ -154,7 +198,7 @@ services:
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-job_website_monitoring_agent}
       AUTOSCALER_SCALING_ENABLED: "false"
       AUTOSCALER_REDIS_URL: redis://redis:6379/0
-      AUTOSCALER_REDIS_QUEUE: processes
+      AUTOSCALER_REDIS_QUEUE: ${CELERY_TASK_QUEUE:-processes}
       AUTOSCALER_COMPOSE_PROJECT_DIR: ${PWD}
       MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
       MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
