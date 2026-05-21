@@ -1,0 +1,2 @@
+docker compose --profile debug --profile monitor down --remove-orphans
+docker compose --profile debug --profile monitor up  --scale worker=4 --scale chrome-node=4

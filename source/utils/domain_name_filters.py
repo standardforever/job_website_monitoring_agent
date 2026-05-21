@@ -196,7 +196,7 @@ class URLFilter:
         Recruitment Related Domain Shift.
 
         Rule: If the original company name appears anywhere in the new domain
-        (subdomain, root, or ATS-hosted), treat it as a recruitment shift.
+        (subdomain, root, or recruitment-hosted), treat it as a recruitment shift.
 
         Returns:
             tuple[bool, str]: (is_recruitment_shift, reason)

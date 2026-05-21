@@ -1,43 +1,171 @@
-version: "3.8"
-
 services:
-  # app:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile
-  #   ports:
-  #     - "8110:8110"
-  #   volumes:
-  #     - .:/app
-  #   env_file:
-  #     - ./source/.env
-  #   environment:
-  #     - SELENIUM_REMOTE_URL=http://chrome:4444/wd/hub
-  #     - MONGODB_URI=mongodb://admin:secret@mongo:27017
-  #     - BROWSER_USE_API_KEY="bu_-9bBL4GohKql0HukZE9izOTupsG9NICY40PiuT-3t5c"
-  #     - BROWSERLESS_API_TOKEN=2TRSGRot5XY5T1M23f6a441b569018ae4d8e62df9e15b247e
-  #     - CLIENT_REGISTRATION_PASSWORD=password_change
-
-  #   depends_on:
-  #     - chrome
-  #     - mongo
-  #   restart: unless-stopped
-
-  chrome:
-    # image: selenium/standalone-chrome:latest # Production
-    image: selenium/standalone-chromium:latest # Development
-    shm_size: "2g"
-    ports:
-      - "4445:4444" # WebDriver / Selenium Grid
-      - "7901:7900" # noVNC live view (password: secret)
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - ./source/.env
     environment:
-      - SE_NODE_SESSION_TIMEOUT=999999999
-      - SE_SESSION_REQUEST_TIMEOUT=999999999
-      - SE_SESSION_RETRY_INTERVAL=5
-      - SE_BROWSER_ARGS_DISABLE_DSHM=--disable-dev-shm-usage
-      - SE_BROWSER_ARGS_NO_SANDBOX=--no-sandbox
+      PROCESS_EXECUTION_MODE: celery
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CELERY_TASK_QUEUE: ${CELERY_TASK_QUEUE:-agent_jobs}
+      SELENIUM_REMOTE_URL: http://selenium-hub:4444/wd/hub
+      MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
+      MONGODB_CLIENTS_COLLECTION: clients
+      MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
+      MONGODB_DOMAIN_RUNS_COLLECTION: domain_runs
+    ports:
+      - "${API_PORT:-8110}:8110"
+    depends_on:
+      mongo:
+        condition: service_started
+      redis:
+        condition: service_started
+      selenium-hub:
+        condition: service_started
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      [
+        "celery",
+        "-A",
+        "infrastructure.queue.celery_app:celery_app",
+        "worker",
+        "--loglevel=INFO",
+        "--concurrency=${CELERY_WORKER_CONCURRENCY:-1}",
+        "--queues=${CELERY_TASK_QUEUE:-agent_jobs}",
+        "--hostname=worker@%h",
+      ]
+    env_file:
+      - ./source/.env
+    environment:
+      PROCESS_EXECUTION_MODE: celery
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CELERY_TASK_QUEUE: ${CELERY_TASK_QUEUE:-agent_jobs}
+      REDIS_PROCESS_HEARTBEAT_TTL_SECONDS: ${REDIS_PROCESS_HEARTBEAT_TTL_SECONDS:-7200}
+      REDIS_PROCESS_HEARTBEAT_INTERVAL_SECONDS: ${REDIS_PROCESS_HEARTBEAT_INTERVAL_SECONDS:-3600}
+      REDIS_PROCESS_HEARTBEAT_PREFIX: ${REDIS_PROCESS_HEARTBEAT_PREFIX:-heartbeat}
+      WATCHDOG_ENABLED: ${WATCHDOG_ENABLED:-true}
+      WATCHDOG_INTERVAL_SECONDS: ${WATCHDOG_INTERVAL_SECONDS:-1800}
+      WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-3}
+      SELENIUM_REMOTE_URL: http://selenium-hub:4444/wd/hub
+      MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
+      MONGODB_CLIENTS_COLLECTION: clients
+      MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
+      MONGODB_DOMAIN_RUNS_COLLECTION: domain_runs
+    depends_on:
+      mongo:
+        condition: service_started
+      redis:
+        condition: service_started
+      selenium-hub:
+        condition: service_started
+      chrome-node:
+        condition: service_started
+    restart: unless-stopped
+
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      [
+        "celery",
+        "-A",
+        "infrastructure.queue.celery_app:celery_app",
+        "beat",
+        "--loglevel=INFO",
+        "--schedule=/tmp/celerybeat-schedule",
+      ]
+    env_file:
+      - ./source/.env
+    environment:
+      PROCESS_EXECUTION_MODE: celery
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CELERY_TASK_QUEUE: ${CELERY_TASK_QUEUE:-agent_jobs}
+      WATCHDOG_ENABLED: ${WATCHDOG_ENABLED:-true}
+      WATCHDOG_INTERVAL_SECONDS: ${WATCHDOG_INTERVAL_SECONDS:-1800}
+      MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
+      MONGODB_CLIENTS_COLLECTION: clients
+      MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
+      MONGODB_DOMAIN_RUNS_COLLECTION: domain_runs
+    depends_on:
+      mongo:
+        condition: service_started
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  legacy-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "tasks.worker"]
+    profiles:
+      - legacy-worker
+    env_file:
+      - ./source/.env
+    environment:
+      PROCESS_EXECUTION_MODE: worker
+      WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-3}
+      SELENIUM_REMOTE_URL: http://selenium-hub:4444/wd/hub
+      MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
+      MONGODB_CLIENTS_COLLECTION: clients
+      MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
+      MONGODB_DOMAIN_RUNS_COLLECTION: domain_runs
+    depends_on:
+      mongo:
+        condition: service_started
+      selenium-hub:
+        condition: service_started
+      chrome-node:
+        condition: service_started
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
     volumes:
-      - ./chrome-profile:/home/seluser/chrome-profile
+      - ./redis-data:/data
+    restart: unless-stopped
+
+  selenium-hub:
+    image: selenium/hub:latest
+    ports:
+      - "${SELENIUM_HUB_PORT:-4445}:4444"
+    environment:
+      SE_SESSION_REQUEST_TIMEOUT: ${SE_SESSION_REQUEST_TIMEOUT:-600}
+      SE_SESSION_RETRY_INTERVAL: ${SE_SESSION_RETRY_INTERVAL:-5}
+    restart: unless-stopped
+
+  chrome-node:
+    image: selenium/node-chromium:latest
+    shm_size: "${CHROME_SHM_SIZE:-2g}"
+    environment:
+      SE_EVENT_BUS_HOST: selenium-hub
+      SE_EVENT_BUS_PUBLISH_PORT: 4442
+      SE_EVENT_BUS_SUBSCRIBE_PORT: 4443
+      SE_NODE_MAX_SESSIONS: ${SE_NODE_MAX_SESSIONS:-1}
+      SE_NODE_OVERRIDE_MAX_SESSIONS: "true"
+      SE_NODE_SESSION_TIMEOUT: ${SE_NODE_SESSION_TIMEOUT:-900}
+      SE_BROWSER_ARGS_DISABLE_DSHM: --disable-dev-shm-usage
+      SE_BROWSER_ARGS_NO_SANDBOX: --no-sandbox
+    depends_on:
+      selenium-hub:
+        condition: service_started
     restart: unless-stopped
 
   mongo:
@@ -45,27 +173,30 @@ services:
     ports:
       - "27017:27017"
     environment:
-      - MONGO_INITDB_ROOT_USERNAME=admin
-      - MONGO_INITDB_ROOT_PASSWORD=secret
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-secret}
     volumes:
       - ./mongo-data:/data/db
       - ./mongod.conf:/etc/mongod.conf:ro
-
     restart: unless-stopped
 
   mongo-express:
     image: mongo-express:latest
+    # profiles:
+    #   - debug
     ports:
-      - "8081:8081" # Web UI → http://localhost:8081
+      - "8081:8081"
     environment:
-      - ME_CONFIG_MONGODB_ADMINUSERNAME=admin
-      - ME_CONFIG_MONGODB_ADMINPASSWORD=secret
-      - ME_CONFIG_MONGODB_URL=mongodb://admin:secret@mongo:27017/
-      - ME_CONFIG_BASICAUTH_USERNAME=admin # UI login
-      - ME_CONFIG_BASICAUTH_PASSWORD=secret # UI login
+      ME_CONFIG_MONGODB_ADMINUSERNAME: ${MONGO_ROOT_USERNAME:-admin}
+      ME_CONFIG_MONGODB_ADMINPASSWORD: ${MONGO_ROOT_PASSWORD:-secret}
+      ME_CONFIG_MONGODB_URL: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017/
+      ME_CONFIG_BASICAUTH_USERNAME: ${MONGO_EXPRESS_USERNAME:-admin}
+      ME_CONFIG_BASICAUTH_PASSWORD: ${MONGO_EXPRESS_PASSWORD:-secret}
     depends_on:
-      - mongo
+      mongo:
+        condition: service_started
     restart: unless-stopped
 
 volumes:
   mongo-data:
+  redis-data:

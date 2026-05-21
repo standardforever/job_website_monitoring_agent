@@ -59,6 +59,14 @@ def mask_api_key(api_key: str | None) -> str | None:
     return f"{value[:4]}...{value[-4:]}"
 
 
+def resolve_openai_api_key(api_key: str | None = None) -> str | None:
+    return api_key or _RUNTIME_API_KEY.get() or os.getenv("OPENAI_API_KEY")
+
+
+def resolve_openai_model(model: str | None = None) -> str:
+    return str(model or _RUNTIME_MODEL.get() or os.getenv("OPENAI_MODEL", "gpt-5-nano")).strip() or "gpt-5-nano"
+
+
 async def validate_openai_api_key(
     *,
     api_key: str,
@@ -118,16 +126,8 @@ def _summarize_api_key_validation_error(error: str) -> str:
 
 class OpenAIAnalysisService:
     def __init__(self, model: str | None = None, api_key: str | None = None) -> None:
-        self._model = (
-            model
-            or _RUNTIME_MODEL.get()
-            or os.getenv("OPENAI_MODEL", "gpt-5-nano")
-        )
-        self._api_key = (
-            api_key
-            or _RUNTIME_API_KEY.get()
-            or os.getenv("OPENAI_API_KEY")
-        )
+        self._model = resolve_openai_model(model)
+        self._api_key = resolve_openai_api_key(api_key)
         if not self._api_key:
             raise ValueError("OPENAI_API_KEY is not configured")
         self._client = OpenAI(api_key=self._api_key)

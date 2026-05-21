@@ -101,7 +101,7 @@ Then classify the page-level listing UI and pagination:
 | `modal_popup` | Clicking opens an overlay on the same page |
 | `expandable_accordion` | Jobs expand in-place on click |
 | `apply_inline` | Apply form embedded directly on listing page |
-| `external_redirect` | Job links point directly to an external/ATS domain |
+| `external_redirect` | Job links point directly to an external recruitment domain |
 
 **pagination_type** — if pagination controls are visible:
 | Value | Meaning |

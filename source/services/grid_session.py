@@ -262,7 +262,9 @@ async def create_session_async(
     *,
     reuse_existing: bool = False,
     preferred_session_id: str | None = None,
+    timeout_seconds: int | float | None = None,
 ) -> SessionBootstrapResult | None:
+    timeout = float(timeout_seconds or os.getenv("BROWSER_SESSION_ACQUIRE_TIMEOUT_SECONDS", "600"))
     try:
         return await asyncio.wait_for(
             asyncio.to_thread(
@@ -271,16 +273,18 @@ async def create_session_async(
                 reuse_existing=reuse_existing,
                 preferred_session_id=preferred_session_id,
             ),
-            timeout=45,
+            timeout=max(30.0, timeout),
         )
     except asyncio.TimeoutError:
         log_event(
             logger,
             "error",
-            "grid_session_timeout grid_url=%s",
+            "grid_session_timeout grid_url=%s timeout_seconds=%s",
             grid_url,
+            timeout,
             domain=grid_url or "grid",
             grid_url=grid_url,
+            timeout_seconds=timeout,
         )
         return None
 
@@ -306,7 +310,7 @@ async def attach_playwright_to_cdp(cdp_url: str) -> BrowserSession | None:
 
     try:
         playwright = await async_playwright().start()
-        browser = await playwright.chromium.connect_over_cdp(cdp_url)
+        browser = await playwright.chromium.connect_over_cdp(cdp_url, timeout=30_000)
         contexts = browser.contexts
         if contexts:
             context = contexts[0]
@@ -345,7 +349,7 @@ async def attach_playwright_to_cdp(cdp_url: str) -> BrowserSession | None:
         return None
 
 
-async def close_agent_tab(session: BrowserSession | None) -> None:
+async def close_browser_attachment(session: BrowserSession | None) -> None:
     if session is None:
         return
 
@@ -360,22 +364,6 @@ async def close_agent_tab(session: BrowserSession | None) -> None:
                 domain=session.cdp_url,
                 session_id=session.session_id,
             )
-    except Exception:
-        pass
-
-
-async def close_browser_attachment(session: BrowserSession | None) -> None:
-    if session is None:
-        return
-
-    try:
-        if not session.page.is_closed():
-            await session.page.close()
-    except Exception:
-        pass
-
-    try:
-        await session.browser.close()
     except Exception:
         pass
 
@@ -419,3 +407,38 @@ def close_shared_session(session_id: str | None) -> None:
 
 async def close_shared_session_async(session_id: str | None) -> None:
     await asyncio.to_thread(close_shared_session, session_id)
+
+
+def close_session_via_http(grid_url: str | None, session_id: str | None) -> None:
+    """Close a grid session via the REST API — works even when the driver is not in this process's registry."""
+    session_key = str(session_id or "").strip()
+    if not session_key or not grid_url:
+        return
+    try:
+        executor_url, _, _ = _normalize_grid_url(grid_url)
+        response = requests.delete(f"{executor_url}/session/{session_key}", timeout=10)
+        log_event(
+            logger,
+            "info",
+            "grid_session_closed_via_http session_id=%s status_code=%s",
+            session_key,
+            response.status_code,
+            domain="grid",
+            session_id=session_key,
+            status_code=response.status_code,
+        )
+    except Exception as exc:
+        log_event(
+            logger,
+            "warning",
+            "grid_session_close_via_http_failed session_id=%s error=%s",
+            session_key,
+            str(exc),
+            domain="grid",
+            session_id=session_key,
+            error=str(exc),
+        )
+
+
+async def close_session_via_http_async(grid_url: str | None, session_id: str | None) -> None:
+    await asyncio.to_thread(close_session_via_http, grid_url, session_id)

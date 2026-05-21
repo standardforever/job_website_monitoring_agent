@@ -3,16 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Job Monitoring Agent</title>
+  <title>Career Page Job Extractor</title>
   <link rel="stylesheet" href="__ASSET_BASE__styles.css">
 </head>
 <body>
   <main class="shell">
     <header class="hero">
       <div>
-        <p class="eyebrow">Job Monitoring Agent</p>
-        <h1>Simple Admin and Client Dashboard</h1>
-        <p class="lede">Register clients, launch process runs, watch status, stop active work, and download reports without leaving the browser.</p>
+        <p class="eyebrow">ProcessZero</p>
+        <h1>Admin and Client Dashboard</h1>
+        <p class="lede">Manage clients, launch career page extraction processes, stop active work, and download reports.</p>
       </div>
       <div class="hero-actions">
         <button id="show-admin" class="button">Admin</button>
@@ -32,7 +32,6 @@
 
       <div id="admin-auth-gate" class="card auth-card">
         <h3>Unlock Admin</h3>
-        <p class="muted">Enter the shared registration password first. Once it is confirmed, the admin dashboard will open for this browser session.</p>
         <form id="admin-auth-form" class="stack">
           <label>
             Registration Password
@@ -47,7 +46,7 @@
           <div class="card-header">
             <div>
               <h3>Admin Dashboard</h3>
-              <p class="muted">Create clients, update settings, and review all registered accounts.</p>
+              <p class="muted">Create clients, update settings, and review accounts.</p>
             </div>
             <div class="inline-actions">
               <button id="refresh-clients" class="button button-secondary" type="button">Refresh</button>
@@ -103,7 +102,7 @@
       <div class="panel-header">
         <div>
           <h2>Client</h2>
-          <p>Enter a registered client name to view recent process runs and launch new ones.</p>
+          <p>Enter a registered client name to view process runs and launch new ones.</p>
         </div>
       </div>
 
@@ -133,21 +132,16 @@
 
         <div class="grid two">
           <div class="card">
-            <h3>Submit URL List</h3>
+            <h3>Submit Domains</h3>
             <form id="manual-process-form" class="stack">
               <label>
-                URLs
+                Domains
                 <textarea id="manual-urls" rows="8" placeholder="Paste one domain per line or separate with commas"></textarea>
               </label>
               <label>
                 Agent Count
                 <input id="manual-agent-count" type="number" min="1" value="2">
               </label>
-              <div class="checkbox-grid">
-                <label><input id="manual-ats-check" type="checkbox" checked> ATS Check</label>
-                <label><input id="manual-job-extract" type="checkbox"> Job Extract</label>
-                <label><input id="manual-job-monitoring" type="checkbox"> Job Monitoring</label>
-              </div>
               <button class="button" type="submit">Start Process</button>
             </form>
           </div>
@@ -159,15 +153,11 @@
                 File
                 <input id="upload-file" type="file" accept=".csv,.xlsx" required>
               </label>
+              <p class="muted">Use a required <code>domain</code> column and optional <code>career_page_url</code> column.</p>
               <label>
                 Agent Count
                 <input id="upload-agent-count" type="number" min="1" value="2">
               </label>
-              <div class="checkbox-grid">
-                <label><input id="upload-ats-check" type="checkbox" checked> ATS Check</label>
-                <label><input id="upload-job-extract" type="checkbox"> Job Extract</label>
-                <label><input id="upload-job-monitoring" type="checkbox"> Job Monitoring</label>
-              </div>
               <button class="button" type="submit">Upload and Start</button>
             </form>
           </div>

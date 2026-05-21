@@ -2,18 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 from typing import Any
 
-from pymongo import ASCENDING, DESCENDING, MongoClient
 import xxhash
+from pymongo import ASCENDING, DESCENDING, MongoClient, ReturnDocument
 
 from core.config import get_settings
-from models.process import RequestedCapability
 from utils.logging import get_logger, log_event
 
 logger = get_logger("mongodb_service")
-MAX_PROCESS_HISTORY_ENTRIES = 30
+MAX_HISTORY_ENTRIES = 30
 
 
 class MongoDBService:
@@ -23,23 +23,17 @@ class MongoDBService:
         self._database_name = settings.mongodb_database
         self._collection_names = {
             "clients": settings.mongodb_clients_collection,
-            "client_domains": settings.mongodb_client_domains_collection,
-            "domains": settings.mongodb_domains_collection,
-            "process_runs": settings.mongodb_process_runs_collection,
-            "process_run_items": settings.mongodb_process_run_items_collection,
-            "domain_checks": settings.mongodb_domain_checks_collection,
-            "jobs": settings.mongodb_jobs_collection,
-            "client_jobs": settings.mongodb_client_jobs_collection,
-            "job_extraction_cache": settings.mongodb_job_extraction_cache_collection,
-            "domain_job_snapshots": settings.mongodb_domain_job_snapshots_collection,
+            "process_uploads": settings.mongodb_process_uploads_collection,
+            "domain_runs": settings.mongodb_domain_runs_collection,
         }
         self._client: MongoClient | None = None
         self._database = None
         log_event(
             logger,
             "info",
-            "mongodb_service_initialized database=%s",
+            "mongodb_service_initialized database=%s collections=%s",
             self._database_name,
+            self._collection_names,
             domain="mongodb",
             database=self._database_name,
             collections=self._collection_names,
@@ -50,8 +44,7 @@ class MongoDBService:
             log_event(
                 logger,
                 "info",
-                "mongodb_connecting uri=%s database=%s",
-                self._uri,
+                "mongodb_connecting database=%s",
                 self._database_name,
                 domain="mongodb",
                 database=self._database_name,
@@ -67,15 +60,6 @@ class MongoDBService:
         await asyncio.to_thread(self._ensure_indexes_sync)
 
     def _ensure_indexes_sync(self) -> None:
-        log_event(
-            logger,
-            "info",
-            "mongodb_ensure_indexes_started database=%s",
-            self._database_name,
-            domain="mongodb",
-            database=self._database_name,
-        )
-
         self._get_collection("clients").create_index(
             [("client_key", ASCENDING)],
             unique=True,
@@ -85,157 +69,37 @@ class MongoDBService:
             [("updated_at", DESCENDING)],
             name="clients_updated_at_desc",
         )
-
-        self._get_collection("client_domains").create_index(
-            [("client_key", ASCENDING), ("domain_key", ASCENDING)],
-            unique=True,
-            name="client_domains_client_domain_unique",
-        )
-
-        self._get_collection("domains").create_index(
-            [("domain_key", ASCENDING)],
-            unique=True,
-            name="domains_domain_key_unique",
-        )
-
-        self._get_collection("process_runs").create_index(
+        self._get_collection("process_uploads").create_index(
             [("process_id", ASCENDING)],
             unique=True,
-            name="process_runs_process_id_unique",
+            name="process_uploads_process_id_unique",
         )
-        self._get_collection("process_runs").create_index(
+        self._get_collection("process_uploads").create_index(
             [("client_key", ASCENDING), ("created_at", DESCENDING)],
-            name="process_runs_client_created_desc",
+            name="process_uploads_client_created",
         )
-        self._get_collection("process_runs").create_index(
-            [("status", ASCENDING)],
-            name="process_runs_status",
+        self._get_collection("process_uploads").create_index(
+            [("status", ASCENDING), ("updated_at", DESCENDING)],
+            name="process_uploads_status_updated",
         )
-
-        self._get_collection("process_run_items").create_index(
-            [("process_id", ASCENDING), ("raw_url", ASCENDING)],
+        self._get_collection("domain_runs").create_index(
+            [("process_id", ASCENDING), ("domain_key", ASCENDING), ("career_page_url", ASCENDING)],
             unique=True,
-            name="process_run_items_process_url_unique",
+            name="domain_runs_process_domain_career_unique",
         )
-        self._get_collection("process_run_items").create_index(
-            [("process_id", ASCENDING)],
-            name="process_run_items_process_id",
+        self._get_collection("domain_runs").create_index(
+            [("process_id", ASCENDING), ("input_index", ASCENDING)],
+            name="domain_runs_process_input_order",
         )
-        self._get_collection("process_run_items").create_index(
-            [("client_key", ASCENDING), ("domain_key", ASCENDING)],
-            name="process_run_items_client_domain",
+        self._get_collection("domain_runs").create_index(
+            [("process_id", ASCENDING), ("status", ASCENDING)],
+            name="domain_runs_process_status",
         )
-
-        self._get_collection("domain_checks").create_index(
-            [("domain_check_id", ASCENDING)],
-            unique=True,
-            name="domain_checks_domain_check_id_unique",
-        )
-        self._get_collection("domain_checks").create_index(
-            [("domain_key", ASCENDING), ("created_at", DESCENDING)],
-            name="domain_checks_domain_created_desc",
-        )
-        self._get_collection("domain_checks").create_index(
-            [("client_key", ASCENDING), ("created_at", DESCENDING)],
-            name="domain_checks_client_created_desc",
-        )
-        self._get_collection("domain_checks").create_index(
-            [("process_id", ASCENDING)],
-            name="domain_checks_process_id",
-        )
-
-        self._get_collection("jobs").create_index(
-            [("job_key", ASCENDING)],
-            unique=True,
-            name="jobs_job_key_unique",
-        )
-        self._get_collection("jobs").create_index(
+        self._get_collection("domain_runs").create_index(
             [("domain_key", ASCENDING), ("updated_at", DESCENDING)],
-            name="jobs_domain_updated_desc",
+            name="domain_runs_domain_updated",
         )
-
-        self._get_collection("client_jobs").create_index(
-            [("client_key", ASCENDING), ("job_key", ASCENDING)],
-            unique=True,
-            name="client_jobs_client_job_unique",
-        )
-        self._get_collection("client_jobs").create_index(
-            [("client_key", ASCENDING), ("updated_at", DESCENDING)],
-            name="client_jobs_client_updated_desc",
-        )
-        self._get_collection("client_jobs").create_index(
-            [("process_id", ASCENDING)],
-            name="client_jobs_process_id",
-        )
-
-        self._get_collection("job_extraction_cache").create_index(
-            [("cache_key", ASCENDING)],
-            unique=True,
-            name="job_extraction_cache_cache_key_unique",
-        )
-        self._get_collection("domain_job_snapshots").create_index(
-            [("snapshot_key", ASCENDING)],
-            unique=True,
-            name="domain_job_snapshots_snapshot_key_unique",
-        )
-        self._get_collection("domain_job_snapshots").create_index(
-            [("domain_key", ASCENDING), ("page_url", ASCENDING), ("run_date", DESCENDING)],
-            name="domain_job_snapshots_domain_page_date",
-        )
-
-        log_event(
-            logger,
-            "info",
-            "mongodb_ensure_indexes_completed database=%s",
-            self._database_name,
-            domain="mongodb",
-            database=self._database_name,
-        )
-
-    async def ensure_client(self, client_key: str, client_name: str) -> None:
-        await asyncio.to_thread(self._ensure_client_sync, client_key, client_name)
-
-    def _ensure_client_sync(self, client_key: str, client_name: str) -> None:
-        now = datetime.utcnow()
-        log_event(
-            logger,
-            "info",
-            "mongodb_ensure_client client_key=%s",
-            client_key,
-            domain=client_key,
-            client_key=client_key,
-        )
-        self._get_collection("clients").update_one(
-            {"client_key": client_key},
-            {
-                "$set": {
-                    "client_name": client_name,
-                    "updated_at": now,
-                },
-                "$setOnInsert": {
-                    "client_key": client_key,
-                    "created_at": now,
-                },
-            },
-            upsert=True,
-        )
-
-    async def get_client(self, client_key: str) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._get_client_sync, client_key)
-
-    def _get_client_sync(self, client_key: str) -> dict[str, Any] | None:
-        return self._get_collection("clients").find_one({"client_key": client_key}, {"_id": 0})
-
-    async def list_clients(self) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._list_clients_sync)
-
-    def _list_clients_sync(self) -> list[dict[str, Any]]:
-        cursor = (
-            self._get_collection("clients")
-            .find({}, {"_id": 0})
-            .sort("updated_at", -1)
-        )
-        return list(cursor)
+        log_event(logger, "info", "mongodb_ensure_indexes_completed", domain="mongodb")
 
     async def upsert_client_configuration(
         self,
@@ -287,10 +151,7 @@ class MongoDBService:
                     "api_key_validation_error": api_key_validation_error,
                     "updated_at": now,
                 },
-                "$setOnInsert": {
-                    "client_key": client_key,
-                    "created_at": now,
-                },
+                "$setOnInsert": {"client_key": client_key, "created_at": now},
             },
             upsert=True,
         )
@@ -337,7 +198,6 @@ class MongoDBService:
         existing = self._get_client_sync(current_client_key)
         if existing is None:
             return None
-
         now = datetime.utcnow()
         self._get_collection("clients").update_one(
             {"client_key": current_client_key},
@@ -353,218 +213,623 @@ class MongoDBService:
                     "api_key_last_validated_at": now,
                     "api_key_validation_error": api_key_validation_error,
                     "updated_at": now,
-                },
+                }
             },
         )
-
         if new_client_key != current_client_key:
-            rename_filter = {"client_key": current_client_key}
-            rename_update = {"$set": {"client_key": new_client_key, "client_name": client_name}}
-            self._get_collection("client_domains").update_many(rename_filter, rename_update)
-            self._get_collection("process_runs").update_many(
-                rename_filter,
-                {"$set": {"client_key": new_client_key, "client_name": client_name, "request.client_name": client_name}},
+            self._get_collection("process_uploads").update_many(
+                {"client_key": current_client_key},
+                {"$set": {"client_key": new_client_key, "client_name": client_name, "updated_at": now}},
             )
-            self._get_collection("process_run_items").update_many(rename_filter, rename_update)
-            self._get_collection("domain_checks").update_many(rename_filter, rename_update)
-            self._get_collection("client_jobs").update_many(rename_filter, rename_update)
+            self._get_collection("domain_runs").update_many(
+                {"client_key": current_client_key},
+                {"$set": {"client_key": new_client_key, "client_name": client_name, "updated_at": now}},
+            )
         else:
-            rename_filter = {"client_key": current_client_key}
-            rename_update = {"$set": {"client_name": client_name}}
-            self._get_collection("client_domains").update_many(rename_filter, rename_update)
-            self._get_collection("process_runs").update_many(
-                rename_filter,
-                {"$set": {"client_name": client_name, "request.client_name": client_name}},
+            self._get_collection("process_uploads").update_many(
+                {"client_key": current_client_key},
+                {"$set": {"client_name": client_name, "updated_at": now}},
             )
-            self._get_collection("process_run_items").update_many(rename_filter, rename_update)
-            self._get_collection("domain_checks").update_many(rename_filter, rename_update)
-            self._get_collection("client_jobs").update_many(rename_filter, rename_update)
-
+            self._get_collection("domain_runs").update_many(
+                {"client_key": current_client_key},
+                {"$set": {"client_name": client_name, "updated_at": now}},
+            )
         return self._get_client_sync(new_client_key)
 
-    async def upsert_client_domain(
-        self,
-        client_key: str,
-        client_name: str,
-        domain_key: str,
-        requested_capability: RequestedCapability,
-        ats_check: bool,
-        job_extract: bool,
-        job_monitoring: bool,
-    ) -> None:
-        await asyncio.to_thread(
-            self._upsert_client_domain_sync,
-            client_key,
-            client_name,
-            domain_key,
-            requested_capability,
-            ats_check,
-            job_extract,
-            job_monitoring,
-        )
+    async def get_client(self, client_key: str) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._get_client_sync, client_key)
 
-    def _upsert_client_domain_sync(
-        self,
-        client_key: str,
-        client_name: str,
-        domain_key: str,
-        requested_capability: RequestedCapability,
-        ats_check: bool,
-        job_extract: bool,
-        job_monitoring: bool,
-    ) -> None:
-        now = datetime.utcnow()
+    def _get_client_sync(self, client_key: str) -> dict[str, Any] | None:
+        return self._get_collection("clients").find_one({"client_key": client_key}, {"_id": 0})
+
+    async def list_clients(self) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._list_clients_sync)
+
+    def _list_clients_sync(self) -> list[dict[str, Any]]:
+        return list(self._get_collection("clients").find({}, {"_id": 0}).sort("updated_at", DESCENDING))
+
+    async def insert_process_upload(self, document: dict[str, Any]) -> None:
+        await asyncio.to_thread(self._insert_process_upload_sync, document)
+
+    def _insert_process_upload_sync(self, document: dict[str, Any]) -> None:
+        self._get_collection("process_uploads").insert_one(document)
         log_event(
             logger,
             "info",
-            "mongodb_upsert_client_domain client_key=%s domain_key=%s capability=%s",
-            client_key,
-            domain_key,
-            requested_capability,
-            domain=domain_key,
-            client_key=client_key,
-            domain_key=domain_key,
-            requested_capability=requested_capability,
-        )
-        self._get_collection("client_domains").update_one(
-            {"client_key": client_key, "domain_key": domain_key},
-            {
-                "$set": {
-                    "client_name": client_name,
-                    "requested_capability": requested_capability,
-                    "ats_check": ats_check,
-                    "job_extract": job_extract,
-                    "job_monitoring": job_monitoring,
-                    "updated_at": now,
-                },
-                "$setOnInsert": {
-                    "client_key": client_key,
-                    "domain_key": domain_key,
-                    "created_at": now,
-                },
-            },
-            upsert=True,
-        )
-
-    async def insert_process_run(self, document: dict[str, Any]) -> None:
-        await asyncio.to_thread(self._insert_process_run_sync, document)
-
-    def _insert_process_run_sync(self, document: dict[str, Any]) -> None:
-        log_event(
-            logger,
-            "info",
-            "mongodb_insert_process_run process_id=%s",
+            "mongodb_insert_process_upload process_id=%s",
             document.get("process_id"),
-            domain=document.get("client_key", "mongodb"),
+            domain="mongodb",
             process_id=document.get("process_id"),
         )
-        self._get_collection("process_runs").insert_one(document)
 
-    async def insert_process_run_items(self, items: list[dict[str, Any]]) -> None:
-        if not items:
-            return
-        await asyncio.to_thread(self._insert_process_run_items_sync, items)
+    async def upsert_domain_runs(self, documents: list[dict[str, Any]]) -> None:
+        if documents:
+            await asyncio.to_thread(self._upsert_domain_runs_sync, documents)
 
-    def _insert_process_run_items_sync(self, items: list[dict[str, Any]]) -> None:
+    def _upsert_domain_runs_sync(self, documents: list[dict[str, Any]]) -> None:
+        for document in documents:
+            key = {
+                "process_id": document["process_id"],
+                "domain_key": document["domain_key"],
+                "career_page_url": document.get("career_page_url"),
+            }
+            created_at = document.get("created_at") or datetime.utcnow()
+            set_document = {key: value for key, value in document.items() if key != "created_at"}
+            self._get_collection("domain_runs").update_one(
+                key,
+                {
+                    "$set": {**set_document, "updated_at": document.get("updated_at") or datetime.utcnow()},
+                    "$setOnInsert": {"created_at": created_at},
+                },
+                upsert=True,
+            )
         log_event(
             logger,
             "info",
-            "mongodb_insert_process_run_items process_id=%s item_count=%s",
-            items[0].get("process_id"),
-            len(items),
-            domain=items[0].get("domain_key", "mongodb"),
-            process_id=items[0].get("process_id"),
-            item_count=len(items),
+            "mongodb_upsert_domain_runs process_id=%s count=%s",
+            documents[0].get("process_id"),
+            len(documents),
+            domain="mongodb",
+            process_id=documents[0].get("process_id"),
+            domain_run_count=len(documents),
         )
-        self._get_collection("process_run_items").insert_many(items)
 
-    async def update_process_run(self, process_id: str, updates: dict[str, Any]) -> None:
-        await asyncio.to_thread(self._update_process_run_sync, process_id, updates)
+    async def get_process_upload(self, process_id: str) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._get_process_upload_sync, process_id)
 
-    def _update_process_run_sync(self, process_id: str, updates: dict[str, Any]) -> None:
+    def _get_process_upload_sync(self, process_id: str) -> dict[str, Any] | None:
+        return self._get_collection("process_uploads").find_one({"process_id": process_id}, {"_id": 0})
+
+    async def get_process_with_domains(self, process_id: str) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._get_process_with_domains_sync, process_id)
+
+    def _get_process_with_domains_sync(self, process_id: str) -> dict[str, Any] | None:
+        process = self._get_process_upload_sync(process_id)
+        if process is None:
+            return None
+        process["items"] = list(
+            self._get_collection("domain_runs")
+            .find({"process_id": process_id}, {"_id": 0})
+            .sort("input_index", ASCENDING)
+        )
+        return process
+
+    async def list_process_uploads(
+        self,
+        *,
+        client_key: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> tuple[list[dict[str, Any]], int]:
+        return await asyncio.to_thread(self._list_process_uploads_sync, client_key, page, page_size)
+
+    def _list_process_uploads_sync(
+        self,
+        client_key: str | None,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        normalized_page = max(1, int(page or 1))
+        normalized_page_size = max(1, min(int(page_size or 50), 200))
+        skip = (normalized_page - 1) * normalized_page_size
+        query = {"client_key": client_key} if client_key else {}
+        total = self._get_collection("process_uploads").count_documents(query)
+        cursor = (
+            self._get_collection("process_uploads")
+            .find(query, {"_id": 0})
+            .sort("created_at", DESCENDING)
+            .skip(skip)
+            .limit(normalized_page_size)
+        )
+        return list(cursor), total
+
+    async def update_process_upload(self, process_id: str, updates: dict[str, Any]) -> None:
+        await asyncio.to_thread(self._update_process_upload_sync, process_id, updates)
+
+    def _update_process_upload_sync(self, process_id: str, updates: dict[str, Any]) -> None:
         updates = {**updates, "updated_at": datetime.utcnow()}
+        self._get_collection("process_uploads").update_one({"process_id": process_id}, {"$set": updates})
         log_event(
             logger,
             "info",
-            "mongodb_update_process_run process_id=%s fields=%s",
+            "mongodb_update_process_upload process_id=%s fields=%s",
             process_id,
             sorted(updates.keys()),
             domain="mongodb",
             process_id=process_id,
             update_fields=sorted(updates.keys()),
         )
-        self._get_collection("process_runs").update_one({"process_id": process_id}, {"$set": updates})
 
-    async def reset_process_for_rerun(self, process_id: str) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._reset_process_for_rerun_sync, process_id)
+    async def heartbeat_process(self, process_id: str, state: str, worker_id: str | None = None) -> None:
+        await asyncio.to_thread(self._heartbeat_process_sync, process_id, state, worker_id)
 
-    def _reset_process_for_rerun_sync(self, process_id: str) -> dict[str, Any] | None:
+    def _heartbeat_process_sync(self, process_id: str, state: str, worker_id: str | None) -> None:
         now = datetime.utcnow()
-        run = self._get_process_run_with_items_sync(process_id)
-        if run is None:
-            return None
-
-        history_item = {
-            "run_at": run.get("completed_at") or run.get("updated_at") or now,
-            "status": run.get("status"),
-            "summary": run.get("summary") or {},
-            "errors": run.get("errors") or [],
-            "payload_hash": self._fingerprint_payload(
-                {
-                    "summary": run.get("summary") or {},
-                    "errors": run.get("errors") or [],
-                    "completed_urls": run.get("completed_urls") or [],
-                    "failed_urls": run.get("failed_urls") or [],
-                    "stopped_urls": run.get("stopped_urls") or [],
-                }
-            ),
+        query: dict[str, Any] = {
+            "process_id": process_id,
+            "status": {"$in": ["acquiring_browser", "recovering", "running", "stop_requested"]},
         }
-        urls = list((run.get("request") or {}).get("urls") or [])
-        assignments = list(run.get("assignments") or [])
-        for assignment in assignments:
-            assignment["status"] = "queued"
+        if worker_id:
+            query["metadata.worker_id"] = worker_id
+        self._get_collection("process_uploads").update_one(
+            query,
+            {
+                "$set": {
+                    "updated_at": now,
+                    "metadata.heartbeat_at": now,
+                    "metadata.heartbeat_state": state,
+                }
+            },
+        )
 
-        self._get_collection("process_runs").update_one(
+    async def release_process_for_browser_retry(self, process_id: str, error: str, retry_delay_seconds: int) -> None:
+        await asyncio.to_thread(self._release_process_for_browser_retry_sync, process_id, error, retry_delay_seconds)
+
+    def _release_process_for_browser_retry_sync(self, process_id: str, error: str, retry_delay_seconds: int) -> None:
+        now = datetime.utcnow()
+        retry_delay = max(1, int(retry_delay_seconds))
+        recovery_grace = max(1, int(get_settings().process_recovery_queued_after_seconds))
+        retry_reserved_until = now + timedelta(seconds=retry_delay + recovery_grace)
+        updates = {
+            "$set": {
+                "status": "queued",
+                "started_at": None,
+                "updated_at": now,
+                "metadata.capacity_state": "waiting_for_browser",
+                "metadata.last_browser_acquire_error": error,
+                "metadata.last_browser_wait_at": now,
+                "metadata.next_browser_retry_after_seconds": retry_delay,
+                "metadata.next_browser_retry_at": now + timedelta(seconds=retry_delay),
+                "metadata.requeue_claimed_at": retry_reserved_until,
+            },
+            "$inc": {"metadata.browser_acquire_attempt_count": 1},
+            "$unset": {"metadata.claimed_at": "", "metadata.worker_id": ""},
+        }
+        self._get_collection("process_uploads").update_one(
+            {"process_id": process_id, "status": {"$in": ["acquiring_browser", "running"]}},
+            updates,
+        )
+        log_event(
+            logger,
+            "info",
+            "mongodb_release_process_for_browser_retry process_id=%s retry_delay_seconds=%s",
+            process_id,
+            retry_delay,
+            domain="mongodb",
+            process_id=process_id,
+            retry_delay_seconds=retry_delay,
+            requeue_claimed_until=retry_reserved_until.isoformat(),
+        )
+
+    async def claim_next_queued_process(self, worker_id: str | None = None) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._claim_next_queued_process_sync, worker_id)
+
+    def _claim_next_queued_process_sync(self, worker_id: str | None) -> dict[str, Any] | None:
+        now = datetime.utcnow()
+        resolved_worker_id = worker_id or os.getenv("WORKER_ID") or os.uname().nodename
+        claimed = self._get_collection("process_uploads").find_one_and_update(
+            {"status": "queued"},
+            {
+                "$set": {
+                    "status": "acquiring_browser",
+                    "started_at": None,
+                    "updated_at": now,
+                    "metadata.worker_id": resolved_worker_id,
+                    "metadata.claimed_at": now,
+                    "metadata.capacity_state": "acquiring_browser",
+                }
+            },
+            sort=[("created_at", ASCENDING)],
+            projection={"_id": 0},
+            return_document=ReturnDocument.AFTER,
+        )
+        if claimed:
+            log_event(
+                logger,
+                "info",
+                "mongodb_claim_next_queued_process process_id=%s worker_id=%s",
+                claimed.get("process_id"),
+                resolved_worker_id,
+                domain="mongodb",
+                process_id=claimed.get("process_id"),
+                worker_id=resolved_worker_id,
+            )
+        return claimed
+
+    async def begin_process_execution(self, process_id: str, worker_id: str | None = None) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._begin_process_execution_sync, process_id, worker_id)
+
+    def _begin_process_execution_sync(self, process_id: str, worker_id: str | None) -> dict[str, Any] | None:
+        now = datetime.utcnow()
+        resolved_worker_id = worker_id or os.getenv("WORKER_ID") or os.uname().nodename
+        claimed = self._get_collection("process_uploads").find_one_and_update(
+            {"process_id": process_id, "status": "queued"},
+            {
+                "$set": {
+                    "status": "acquiring_browser",
+                    "started_at": None,
+                    "updated_at": now,
+                    "metadata.worker_id": resolved_worker_id,
+                    "metadata.claimed_at": now,
+                    "metadata.capacity_state": "acquiring_browser",
+                }
+            },
+            projection={"_id": 0},
+            return_document=ReturnDocument.AFTER,
+        )
+        if claimed is None:
+            return None
+        claimed["items"] = list(
+            self._get_collection("domain_runs")
+            .find({"process_id": process_id}, {"_id": 0})
+            .sort("input_index", ASCENDING)
+        )
+        return claimed
+
+    async def mark_process_running(self, process_id: str) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._mark_process_running_sync, process_id)
+
+    def _mark_process_running_sync(self, process_id: str) -> dict[str, Any] | None:
+        now = datetime.utcnow()
+        process = self._get_collection("process_uploads").find_one_and_update(
+            {"process_id": process_id, "status": "acquiring_browser"},
+            {
+                "$set": {
+                    "status": "running",
+                    "started_at": now,
+                    "updated_at": now,
+                    "metadata.capacity_state": "browser_acquired",
+                    "metadata.browser_acquired_at": now,
+                },
+                "$unset": {
+                    "metadata.requeue_claimed_at": "",
+                    "metadata.next_browser_retry_at": "",
+                    "metadata.next_browser_retry_after_seconds": "",
+                    "metadata.last_browser_acquire_error": "",
+                    "metadata.last_browser_wait_at": "",
+                },
+            },
+            projection={"_id": 0},
+            return_document=ReturnDocument.AFTER,
+        )
+        if process is None:
+            return None
+        process["items"] = list(
+            self._get_collection("domain_runs")
+            .find({"process_id": process_id}, {"_id": 0})
+            .sort("input_index", ASCENDING)
+        )
+        return process
+
+    async def mark_process_stop_requested(self, process_id: str) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._mark_process_stop_requested_sync, process_id)
+
+    def _mark_process_stop_requested_sync(self, process_id: str) -> dict[str, Any] | None:
+        now = datetime.utcnow()
+        self._get_collection("process_uploads").update_one(
+            {"process_id": process_id, "status": {"$in": ["queued", "acquiring_browser", "recovering", "running", "stop_requested"]}},
+            {"$set": {"status": "stop_requested", "updated_at": now}},
+        )
+        return self._get_process_upload_sync(process_id)
+
+    async def recover_interrupted_processes(self, *, stale_after_seconds: int) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._recover_interrupted_processes_sync, stale_after_seconds)
+
+    async def list_running_processes(self) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._list_running_processes_sync)
+
+    def _list_running_processes_sync(self) -> list[dict[str, Any]]:
+        return list(
+            self._get_collection("process_uploads").find(
+                {"status": "running"},
+                {
+                    "_id": 0,
+                    "process_id": 1,
+                    "status": 1,
+                    "metadata.worker_id": 1,
+                    "metadata.active_browser_session_id": 1,
+                    "metadata.active_grid_url": 1,
+                    "updated_at": 1,
+                },
+            )
+        )
+
+    async def recover_process_missing_heartbeat(self, process_id: str) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._recover_process_missing_heartbeat_sync, process_id)
+
+    async def recover_process_lost_browser(self, process_id: str, error: str) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._recover_process_lost_browser_sync, process_id, error)
+
+    def _recover_process_lost_browser_sync(self, process_id: str, error: str) -> dict[str, Any] | None:
+        now = datetime.utcnow()
+        process = self._get_collection("process_uploads").find_one_and_update(
+            {"process_id": process_id, "status": "running"},
+            {
+                "$set": {
+                    "status": "recovering",
+                    "updated_at": now,
+                    "metadata.recovery_claimed_at": now,
+                    "metadata.recovery_previous_status": "running",
+                    "metadata.recovery_reason": "browser_session_lost",
+                    "metadata.last_browser_session_error": error,
+                }
+            },
+            projection={"_id": 0},
+            return_document=ReturnDocument.BEFORE,
+        )
+        if process is None:
+            return None
+        recovered = self._recover_stale_running_process(process, now)
+        self._get_collection("process_uploads").update_one(
+            {"process_id": process_id},
+            {
+                "$set": {
+                    "metadata.recovery_reason": "browser_session_lost",
+                    "metadata.recovered_after_browser_loss": True,
+                    "metadata.last_browser_session_error": error,
+                }
+            },
+        )
+        log_event(
+            logger,
+            "warning",
+            "mongodb_recover_process_lost_browser process_id=%s error=%s",
+            process_id,
+            error,
+            domain="mongodb",
+            process_id=process_id,
+            error=error,
+        )
+        return recovered
+
+    def _recover_process_missing_heartbeat_sync(self, process_id: str) -> dict[str, Any] | None:
+        now = datetime.utcnow()
+        process = self._get_collection("process_uploads").find_one_and_update(
+            {"process_id": process_id, "status": "running"},
+            {
+                "$set": {
+                    "status": "recovering",
+                    "updated_at": now,
+                    "metadata.recovery_claimed_at": now,
+                    "metadata.recovery_previous_status": "running",
+                    "metadata.recovery_reason": "missing_redis_heartbeat",
+                }
+            },
+            projection={"_id": 0},
+            return_document=ReturnDocument.BEFORE,
+        )
+        if process is None:
+            return None
+        recovered = self._recover_stale_running_process(process, now)
+        self._get_collection("process_uploads").update_one(
+            {"process_id": process_id},
+            {
+                "$set": {
+                    "metadata.recovery_reason": "missing_redis_heartbeat",
+                    "metadata.recovered_by_watchdog": True,
+                }
+            },
+        )
+        return recovered
+
+    def _recover_interrupted_processes_sync(self, stale_after_seconds: int) -> list[dict[str, Any]]:
+        now = datetime.utcnow()
+        stale_before = now - timedelta(seconds=max(1, int(stale_after_seconds)))
+        candidates = list(
+            self._get_collection("process_uploads").find(
+                {
+                    "status": {"$in": ["acquiring_browser", "running", "stop_requested", "recovering"]},
+                    "updated_at": {"$lte": stale_before},
+                },
+                {"_id": 0},
+            )
+        )
+        recovered: list[dict[str, Any]] = []
+        for candidate in candidates:
+            process_id = candidate.get("process_id")
+            if not process_id:
+                continue
+            process = self._claim_stale_process_for_recovery(
+                str(process_id),
+                str(candidate.get("status") or ""),
+                stale_before,
+                now,
+            )
+            if process is None:
+                continue
+            metadata = dict(process.get("metadata") or {})
+            previous_status = str(
+                metadata.get("recovery_previous_status")
+                if process.get("status") == "recovering"
+                else process.get("status")
+            )
+            if previous_status == "stop_requested":
+                recovered.append(self._recover_stale_stop_requested_process(process, now))
+            elif previous_status == "acquiring_browser":
+                recovered.append(self._recover_stale_acquiring_browser_process(process, now))
+            else:
+                recovered.append(self._recover_stale_running_process(process, now))
+        if recovered:
+            log_event(
+                logger,
+                "warning",
+                "mongodb_recovered_interrupted_processes count=%s stale_after_seconds=%s",
+                len(recovered),
+                stale_after_seconds,
+                domain="mongodb",
+                recovered_count=len(recovered),
+                stale_after_seconds=stale_after_seconds,
+            )
+        return recovered
+
+    def _claim_stale_process_for_recovery(
+        self,
+        process_id: str,
+        status: str,
+        stale_before: datetime,
+        now: datetime,
+    ) -> dict[str, Any] | None:
+        recovery_fields = {
+            "status": "recovering",
+            "updated_at": now,
+            "metadata.recovery_claimed_at": now,
+        }
+        if status != "recovering":
+            recovery_fields["metadata.recovery_previous_status"] = status
+        return self._get_collection("process_uploads").find_one_and_update(
+            {
+                "process_id": process_id,
+                "status": status,
+                "updated_at": {"$lte": stale_before},
+            },
+            {"$set": recovery_fields},
+            projection={"_id": 0},
+            return_document=ReturnDocument.BEFORE,
+        )
+
+    async def find_stale_queued_processes(self, *, queued_after_seconds: int) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._find_stale_queued_processes_sync, queued_after_seconds)
+
+    async def count_active_processes(self) -> int:
+        return await asyncio.to_thread(self._count_active_processes_sync)
+
+    def _count_active_processes_sync(self) -> int:
+        return int(
+            self._get_collection("process_uploads").count_documents(
+                {"status": {"$in": ["acquiring_browser", "recovering", "running", "stop_requested"]}}
+            )
+        )
+
+    def _find_stale_queued_processes_sync(self, queued_after_seconds: int) -> list[dict[str, Any]]:
+        now = datetime.utcnow()
+        queued_after = max(1, int(queued_after_seconds))
+        stale_before = now - timedelta(seconds=queued_after)
+        claimed: list[dict[str, Any]] = []
+        while True:
+            process = self._get_collection("process_uploads").find_one_and_update(
+                {
+                    "status": "queued",
+                    "updated_at": {"$lte": stale_before},
+                    "$or": [
+                        {"metadata.requeue_claimed_at": {"$exists": False}},
+                        {"metadata.requeue_claimed_at": {"$lte": stale_before}},
+                    ],
+                },
+                {
+                    "$set": {
+                        "updated_at": now,
+                        "metadata.requeue_claimed_at": now + timedelta(seconds=queued_after),
+                    }
+                },
+                sort=[("updated_at", ASCENDING)],
+                projection={"_id": 0},
+                return_document=ReturnDocument.AFTER,
+            )
+            if process is None:
+                break
+            claimed.append(process)
+        return [
+            {
+                "process_id": process.get("process_id"),
+                "previous_status": "queued",
+                "recovered_status": "queued",
+                "action": "requeue_stale_queued",
+            }
+            for process in claimed
+            if process.get("process_id")
+        ]
+
+    def _recover_stale_stop_requested_process(self, process: dict[str, Any], now: datetime) -> dict[str, Any]:
+        process_id = process["process_id"]
+        stopped_result = self._get_collection("domain_runs").update_many(
+            {
+                "process_id": process_id,
+                "status": {"$in": ["queued", "acquiring_browser", "recovering", "running", "stop_requested"]},
+            },
+            {
+                "$set": {
+                    "status": "stopped",
+                    "error": "Process stop requested before service interruption recovery.",
+                    "completed_at": now,
+                    "updated_at": now,
+                }
+            },
+        )
+        self._get_collection("process_uploads").update_one(
+            {"process_id": process_id},
+            {
+                "$set": {
+                    "status": "stopped",
+                    "completed_at": now,
+                    "updated_at": now,
+                    "metadata.recovered_after_interruption": True,
+                    "metadata.recovery_action": "stopped_after_stale_stop_request",
+                    "metadata.recovered_at": now,
+                }
+            },
+        )
+        return {
+            "process_id": process_id,
+            "previous_status": process.get("status"),
+            "recovered_status": "stopped",
+            "action": "stopped",
+            "domain_count": stopped_result.modified_count,
+        }
+
+    def _recover_stale_acquiring_browser_process(self, process: dict[str, Any], now: datetime) -> dict[str, Any]:
+        process_id = process["process_id"]
+        self._get_collection("process_uploads").update_one(
             {"process_id": process_id},
             {
                 "$set": {
                     "status": "queued",
-                    "assignments": assignments,
-                    "queued_urls": urls,
-                    "running_urls": [],
-                    "completed_urls": [],
-                    "failed_urls": [],
-                    "stopped_urls": [],
-                    "errors": [],
-                    "summary": {
-                        "total_urls": len(urls),
-                        "assigned_agent_count": len(assignments),
-                        "processed_url_count": 0,
-                        "completed_domain_count": 0,
-                        "failed_domain_count": 0,
-                        "queued_url_count": len(urls),
-                        "running_url_count": 0,
-                        "stopped_url_count": 0,
-                    },
-                    "metadata.workflow_mode": "rerun",
-                    "metadata.rerun_of_process_id": process_id,
-                    "metadata.last_rerun_requested_at": now,
                     "started_at": None,
                     "completed_at": None,
                     "updated_at": now,
+                    "metadata.recovered_after_interruption": True,
+                    "metadata.recovery_action": "requeued_after_stale_browser_acquire",
+                    "metadata.recovered_at": now,
+                    "metadata.capacity_state": "waiting_for_browser",
                 },
-                "$push": {
-                    "history": {
-                        "$each": [history_item],
-                        "$slice": -MAX_PROCESS_HISTORY_ENTRIES,
-                    }
-                },
+                "$unset": {"metadata.claimed_at": "", "metadata.worker_id": ""},
             },
         )
+        return {
+            "process_id": process_id,
+            "previous_status": process.get("status"),
+            "recovered_status": "queued",
+            "action": "requeued_browser_acquire",
+            "domain_count": 0,
+        }
 
-        for item in list(run.get("items") or []):
-            item_history = self._build_process_item_history_entry(item, now)
-            update_doc: dict[str, Any] = {
+    def _recover_stale_running_process(self, process: dict[str, Any], now: datetime) -> dict[str, Any]:
+        process_id = process["process_id"]
+        reset_result = self._get_collection("domain_runs").update_many(
+            {
+                "process_id": process_id,
+                "status": {"$in": ["queued", "acquiring_browser", "recovering", "running", "stop_requested"]},
+            },
+            {
                 "$set": {
                     "status": "queued",
                     "error": None,
@@ -573,22 +838,133 @@ class MongoDBService:
                     "completed_at": None,
                     "updated_at": now,
                 }
+            },
+        )
+        self._get_collection("process_uploads").update_one(
+            {"process_id": process_id},
+            {
+                "$set": {
+                    "status": "queued",
+                    "assignments.$[].status": "queued",
+                    "started_at": None,
+                    "completed_at": None,
+                    "updated_at": now,
+                    "metadata.recovered_after_interruption": True,
+                    "metadata.recovery_action": "requeued_after_stale_running",
+                    "metadata.recovered_at": now,
+                }
+            },
+        )
+        return {
+            "process_id": process_id,
+            "previous_status": process.get("status"),
+            "recovered_status": "queued",
+            "action": "requeued",
+            "domain_count": reset_result.modified_count,
+        }
+
+    async def reset_process_for_rerun(self, process_id: str) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._reset_process_for_rerun_sync, process_id)
+
+    def _reset_process_for_rerun_sync(self, process_id: str) -> dict[str, Any] | None:
+        now = datetime.utcnow()
+        process = self._get_process_with_domains_sync(process_id)
+        if process is None:
+            return None
+
+        assignments = list(process.get("assignments") or [])
+        self._reset_assignment_progress_for_rerun(assignments)
+
+        history_item = {
+            "run_at": process.get("completed_at") or process.get("updated_at") or now,
+            "status": process.get("status"),
+            "summary": process.get("summary") or {},
+            "errors": process.get("errors") or [],
+            "payload_hash": self._fingerprint_payload(
+                {
+                    "summary": process.get("summary") or {},
+                    "errors": process.get("errors") or [],
+                    "items": [
+                        {
+                            "domain_key": item.get("domain_key"),
+                            "status": item.get("status"),
+                            "result_summary": item.get("result_summary") or {},
+                        }
+                        for item in process.get("items") or []
+                    ],
+                }
+            ),
+        }
+
+        domain_count = len(process.get("domains") or [])
+        self._get_collection("process_uploads").update_one(
+            {"process_id": process_id},
+            {
+                "$set": {
+                    "status": "queued",
+                    "assignments": assignments,
+                    "summary": self._empty_summary(domain_count, len(assignments)),
+                    "errors": [],
+                    "metadata.workflow_mode": "rerun",
+                    "metadata.last_rerun_requested_at": now,
+                    "started_at": None,
+                    "completed_at": None,
+                    "updated_at": now,
+                },
+                "$push": {"history": {"$each": [history_item], "$slice": -MAX_HISTORY_ENTRIES}},
+            },
+        )
+
+        for item in process.get("items") or []:
+            item_history = self._domain_run_history_item(item, now)
+            update_doc: dict[str, Any] = {
+                "$set": {
+                    "status": "queued",
+                    "error": None,
+                    "agent_index": None,
+                    "result_summary": {},
+                    "result_payload": {},
+                    "added_job_keys": [],
+                    "removed_job_keys": [],
+                    "unchanged_job_keys": [],
+                    "previous_job_keys": list(item.get("current_job_keys") or []),
+                    "started_at": None,
+                    "completed_at": None,
+                    "updated_at": now,
+                }
             }
             if item_history:
-                update_doc["$push"] = {
-                    "history": {
-                        "$each": [item_history],
-                        "$slice": -MAX_PROCESS_HISTORY_ENTRIES,
-                    }
-                }
-            self._get_collection("process_run_items").update_one(
-                {"process_id": process_id, "raw_url": item.get("raw_url")},
+                update_doc["$push"] = {"history": {"$each": [item_history], "$slice": -MAX_HISTORY_ENTRIES}}
+            self._get_collection("domain_runs").update_one(
+                {
+                    "process_id": process_id,
+                    "domain_key": item.get("domain_key"),
+                    "career_page_url": item.get("career_page_url"),
+                },
                 update_doc,
             )
+        return self._get_process_upload_sync(process_id)
 
-        return self._get_process_run_sync(process_id)
+    def _empty_summary(self, domain_count: int, agent_count: int) -> dict[str, int]:
+        return {
+            "total_domain_count": domain_count,
+            "assigned_agent_count": agent_count,
+            "processed_domain_count": 0,
+            "completed_domain_count": 0,
+            "failed_domain_count": 0,
+            "stopped_domain_count": 0,
+            "job_count": 0,
+            "new_job_count": 0,
+        }
 
-    def _build_process_item_history_entry(self, item: dict[str, Any], fallback_time: datetime) -> dict[str, Any] | None:
+    def _reset_assignment_progress_for_rerun(self, assignments: list[dict[str, Any]]) -> None:
+        for assignment in assignments:
+            assignment["status"] = "queued"
+            assignment.pop("processed_domain", None)
+            assignment.pop("pending_domain", None)
+            assignment.pop("failed_domain", None)
+
+    def _domain_run_history_item(self, item: dict[str, Any], fallback_time: datetime) -> dict[str, Any] | None:
         if not item.get("result_summary") and not item.get("result_payload") and not item.get("error"):
             return None
         return {
@@ -596,320 +972,89 @@ class MongoDBService:
             "status": item.get("status"),
             "error": item.get("error"),
             "summary": item.get("result_summary") or {},
+            "current_job_keys": item.get("current_job_keys") or [],
             "payload_hash": self._fingerprint_payload(item.get("result_payload") or {}),
         }
-
-    def _fingerprint_payload(self, payload: Any) -> str:
-        serialized = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
-        return xxhash.xxh64(serialized).hexdigest()
-
-    async def get_process_run(self, process_id: str) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._get_process_run_sync, process_id)
-
-    def _get_process_run_sync(self, process_id: str) -> dict[str, Any] | None:
-        return self._get_collection("process_runs").find_one({"process_id": process_id}, {"_id": 0})
-
-    async def get_process_run_with_items(self, process_id: str) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._get_process_run_with_items_sync, process_id)
-
-    def _get_process_run_with_items_sync(self, process_id: str) -> dict[str, Any] | None:
-        run = self._get_collection("process_runs").find_one({"process_id": process_id}, {"_id": 0})
-        if run is None:
-            return None
-        items = list(
-            self._get_collection("process_run_items").find(
-                {"process_id": process_id},
-                {"_id": 0},
-            )
-        )
-        run["items"] = items
-        return run
-
-    async def list_process_runs_for_client(
-        self,
-        client_key: str,
-        *,
-        page: int = 1,
-        page_size: int = 50,
-    ) -> tuple[list[dict[str, Any]], int]:
-        return await asyncio.to_thread(self._list_process_runs_for_client_sync, client_key, page, page_size)
-
-    def _list_process_runs_for_client_sync(
-        self,
-        client_key: str,
-        page: int,
-        page_size: int,
-    ) -> tuple[list[dict[str, Any]], int]:
-        normalized_page = max(1, int(page or 1))
-        normalized_page_size = max(1, min(int(page_size or 50), 200))
-        skip = (normalized_page - 1) * normalized_page_size
-        total = self._get_collection("process_runs").count_documents({"client_key": client_key})
-        cursor = (
-            self._get_collection("process_runs")
-            .find({"client_key": client_key}, {"_id": 0})
-            .sort("created_at", -1)
-            .skip(skip)
-            .limit(normalized_page_size)
-        )
-        return list(cursor), total
-
-    async def list_all_process_runs(self, limit: int = 100) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._list_all_process_runs_sync, limit)
-
-    def _list_all_process_runs_sync(self, limit: int) -> list[dict[str, Any]]:
-        cursor = (
-            self._get_collection("process_runs")
-            .find({}, {"_id": 0})
-            .sort("created_at", -1)
-            .limit(limit)
-        )
-        return list(cursor)
-
-    async def get_client_domains(self, client_key: str) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._get_client_domains_sync, client_key)
-
-    def _get_client_domains_sync(self, client_key: str) -> list[dict[str, Any]]:
-        cursor = self._get_collection("client_domains").find({"client_key": client_key}, {"_id": 0})
-        return list(cursor)
-
-    async def list_client_domain_summaries(self, client_key: str) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._list_client_domain_summaries_sync, client_key)
-
-    def _list_client_domain_summaries_sync(self, client_key: str) -> list[dict[str, Any]]:
-        pipeline = [
-            {"$match": {"client_key": client_key}},
-            {
-                "$group": {
-                    "_id": "$domain_key",
-                    "domain_key": {"$first": "$domain_key"},
-                    "raw_urls": {"$addToSet": "$raw_url"},
-                    "process_ids": {"$addToSet": "$process_id"},
-                    "requested_capabilities": {"$addToSet": "$requested_capability"},
-                    "latest_status": {"$last": "$status"},
-                    "last_seen_at": {"$max": "$updated_at"},
-                    "created_at": {"$min": "$created_at"},
-                }
-            },
-            {
-                "$lookup": {
-                    "from": self._collection_names["domains"],
-                    "localField": "domain_key",
-                    "foreignField": "domain_key",
-                    "as": "domain_state",
-                }
-            },
-            {"$set": {"domain_state": {"$first": "$domain_state"}}},
-            {
-                "$project": {
-                    "_id": 0,
-                    "domain_key": 1,
-                    "raw_urls": 1,
-                    "process_ids": 1,
-                    "requested_capabilities": 1,
-                    "latest_status": 1,
-                    "last_seen_at": 1,
-                    "created_at": 1,
-                    "career_url_extraction": "$domain_state.career_url_extraction",
-                    "career_page_overview": "$domain_state.career_page_result.overview",
-                    "jobs_extraction_summary": "$domain_state.jobs_extraction_summary",
-                    "last_career_discovery_at": "$domain_state.last_career_discovery_at",
-                    "next_career_url_discovery_due_at": "$domain_state.next_career_url_discovery_due_at",
-                    "last_career_check_at": "$domain_state.last_career_check_at",
-                    "last_ats_check_at": "$domain_state.last_ats_check_at",
-                    "last_job_extract_at": "$domain_state.last_job_extract_at",
-                }
-            },
-            {"$sort": {"last_seen_at": -1}},
-        ]
-        return list(self._get_collection("process_run_items").aggregate(pipeline))
-
-    async def list_client_jobs(self, client_key: str, limit: int = 500) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._list_client_jobs_sync, client_key, limit)
-
-    def _list_client_jobs_sync(self, client_key: str, limit: int) -> list[dict[str, Any]]:
-        cursor = (
-            self._get_collection("client_jobs")
-            .find({"client_key": client_key}, {"_id": 0})
-            .sort("updated_at", -1)
-            .limit(limit)
-        )
-        return list(cursor)
 
     async def update_assignment_status(self, process_id: str, agent_index: int, status: str) -> None:
         await asyncio.to_thread(self._update_assignment_status_sync, process_id, agent_index, status)
 
     def _update_assignment_status_sync(self, process_id: str, agent_index: int, status: str) -> None:
-        now = datetime.utcnow()
-        self._get_collection("process_runs").update_one(
+        self._get_collection("process_uploads").update_one(
             {"process_id": process_id, "assignments.agent_index": agent_index},
-            {
-                "$set": {
-                    "assignments.$.status": status,
-                    "updated_at": now,
-                }
-            },
+            {"$set": {"assignments.$.status": status, "updated_at": datetime.utcnow()}},
         )
 
-    async def mark_process_stop_requested(self, process_id: str) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._mark_process_stop_requested_sync, process_id)
+    async def mark_domain_running(self, process_id: str, domain_key: str, career_page_url: str | None, agent_index: int) -> None:
+        await asyncio.to_thread(self._mark_domain_running_sync, process_id, domain_key, career_page_url, agent_index)
 
-    def _mark_process_stop_requested_sync(self, process_id: str) -> dict[str, Any] | None:
+    def _mark_domain_running_sync(self, process_id: str, domain_key: str, career_page_url: str | None, agent_index: int) -> None:
         now = datetime.utcnow()
-        self._get_collection("process_runs").update_one(
-            {"process_id": process_id, "status": {"$in": ["queued", "running", "stop_requested"]}},
-            {
-                "$set": {
-                    "status": "stop_requested",
-                    "updated_at": now,
-                }
-            },
+        key = {"process_id": process_id, "domain_key": domain_key, "career_page_url": career_page_url}
+        self._get_collection("domain_runs").update_one(
+            key,
+            {"$set": {"status": "running", "agent_index": agent_index, "started_at": now, "updated_at": now}},
         )
-        return self._get_process_run_sync(process_id)
 
-    async def update_process_run_item(
+    async def mark_domain_completed(
         self,
         process_id: str,
-        raw_url: str,
+        domain_key: str,
+        career_page_url: str | None,
         updates: dict[str, Any],
     ) -> None:
-        await asyncio.to_thread(self._update_process_run_item_sync, process_id, raw_url, updates)
+        await asyncio.to_thread(self._mark_domain_completed_sync, process_id, domain_key, career_page_url, updates)
 
-    def _update_process_run_item_sync(self, process_id: str, raw_url: str, updates: dict[str, Any]) -> None:
-        self._get_collection("process_run_items").update_one(
-            {"process_id": process_id, "raw_url": raw_url},
-            {"$set": {**updates, "updated_at": datetime.utcnow()}},
-        )
-
-    async def mark_url_running(self, process_id: str, url: str, agent_index: int) -> None:
-        await asyncio.to_thread(self._mark_url_running_sync, process_id, url, agent_index)
-
-    def _mark_url_running_sync(self, process_id: str, url: str, agent_index: int) -> None:
-        now = datetime.utcnow()
-        self._get_collection("process_runs").update_one(
-            {"process_id": process_id},
-            {
-                "$pull": {"queued_urls": url},
-                "$addToSet": {"running_urls": url},
-                "$inc": {
-                    "summary.queued_url_count": -1,
-                    "summary.running_url_count": 1,
-                },
-                "$set": {"updated_at": now},
-            },
-        )
-        self._get_collection("process_run_items").update_one(
-            {"process_id": process_id, "raw_url": url},
-            {
-                "$set": {
-                    "status": "running",
-                    "agent_index": agent_index,
-                    "started_at": now,
-                    "updated_at": now,
-                }
-            },
-        )
-
-    async def mark_url_completed(
+    def _mark_domain_completed_sync(
         self,
         process_id: str,
-        url: str,
-        result_summary: dict[str, Any],
-        result_payload: dict[str, Any],
-        domain_check_id: str,
-    ) -> None:
-        await asyncio.to_thread(
-            self._mark_url_completed_sync,
-            process_id,
-            url,
-            result_summary,
-            result_payload,
-            domain_check_id,
-        )
-
-    def _mark_url_completed_sync(
-        self,
-        process_id: str,
-        url: str,
-        result_summary: dict[str, Any],
-        result_payload: dict[str, Any],
-        domain_check_id: str,
+        domain_key: str,
+        career_page_url: str | None,
+        updates: dict[str, Any],
     ) -> None:
         now = datetime.utcnow()
-        self._get_collection("process_runs").update_one(
-            {"process_id": process_id},
-            {
-                "$pull": {"queued_urls": url, "running_urls": url},
-                "$addToSet": {"completed_urls": url},
-                "$inc": {
-                    "summary.running_url_count": -1,
-                    "summary.processed_url_count": 1,
-                    "summary.completed_domain_count": 1,
-                },
-                "$set": {"updated_at": now},
-            },
-        )
-        self._get_collection("process_run_items").update_one(
-            {"process_id": process_id, "raw_url": url},
+        self._get_collection("domain_runs").update_one(
+            {"process_id": process_id, "domain_key": domain_key, "career_page_url": career_page_url},
             {
                 "$set": {
+                    **updates,
                     "status": "completed",
                     "error": None,
-                    "result_summary": result_summary,
-                    "result_payload": result_payload,
-                    "domain_check_id": domain_check_id,
                     "completed_at": now,
                     "updated_at": now,
                 }
             },
         )
 
-    async def mark_url_failed(
+    async def mark_domain_failed(
         self,
         process_id: str,
-        url: str,
+        domain_key: str,
+        career_page_url: str | None,
         error: str,
         *,
         result_payload: dict[str, Any] | None = None,
-        was_running: bool = True,
     ) -> None:
         await asyncio.to_thread(
-            self._mark_url_failed_sync,
+            self._mark_domain_failed_sync,
             process_id,
-            url,
+            domain_key,
+            career_page_url,
             error,
             result_payload or {},
-            was_running,
         )
 
-    def _mark_url_failed_sync(
+    def _mark_domain_failed_sync(
         self,
         process_id: str,
-        url: str,
+        domain_key: str,
+        career_page_url: str | None,
         error: str,
         result_payload: dict[str, Any],
-        was_running: bool,
     ) -> None:
         now = datetime.utcnow()
-        inc_fields = {
-            "summary.processed_url_count": 1,
-            "summary.failed_domain_count": 1,
-        }
-        if was_running:
-            inc_fields["summary.running_url_count"] = -1
-        else:
-            inc_fields["summary.queued_url_count"] = -1
-
-        self._get_collection("process_runs").update_one(
-            {"process_id": process_id},
-            {
-                "$pull": {"queued_urls": url, "running_urls": url},
-                "$addToSet": {"failed_urls": url},
-                "$inc": inc_fields,
-                "$set": {"updated_at": now},
-            },
-        )
-        self._get_collection("process_run_items").update_one(
-            {"process_id": process_id, "raw_url": url},
+        self._get_collection("domain_runs").update_one(
+            {"process_id": process_id, "domain_key": domain_key, "career_page_url": career_page_url},
             {
                 "$set": {
                     "status": "failed",
@@ -921,276 +1066,30 @@ class MongoDBService:
             },
         )
 
-    async def mark_urls_stopped(
-        self,
-        process_id: str,
-        urls: list[str],
-        *,
-        agent_index: int | None = None,
-        reason: str = "Process stop requested.",
-    ) -> None:
-        if not urls:
-            return
-        await asyncio.to_thread(self._mark_urls_stopped_sync, process_id, urls, agent_index, reason)
+    async def mark_domains_stopped(self, process_id: str, domain_run_keys: list[dict[str, Any]]) -> None:
+        if domain_run_keys:
+            await asyncio.to_thread(self._mark_domains_stopped_sync, process_id, domain_run_keys)
 
-    def _mark_urls_stopped_sync(
-        self,
-        process_id: str,
-        urls: list[str],
-        agent_index: int | None,
-        reason: str,
-    ) -> None:
+    def _mark_domains_stopped_sync(self, process_id: str, domain_run_keys: list[dict[str, Any]]) -> None:
         now = datetime.utcnow()
-        run = self._get_process_run_sync(process_id) or {}
-        queued_urls = set(run.get("queued_urls") or [])
-        running_urls = set(run.get("running_urls") or [])
-        target_urls = [url for url in urls if url in queued_urls or url in running_urls]
-        if not target_urls:
-            return
-
-        queued_count = sum(1 for url in target_urls if url in queued_urls)
-        running_count = sum(1 for url in target_urls if url in running_urls)
-        inc_fields: dict[str, int] = {"summary.stopped_url_count": len(target_urls)}
-        if queued_count:
-            inc_fields["summary.queued_url_count"] = -queued_count
-        if running_count:
-            inc_fields["summary.running_url_count"] = -running_count
-
-        self._get_collection("process_runs").update_one(
-            {"process_id": process_id},
-            {
-                "$pull": {"queued_urls": {"$in": target_urls}, "running_urls": {"$in": target_urls}},
-                "$addToSet": {"stopped_urls": {"$each": target_urls}},
-                "$inc": inc_fields,
-                "$set": {"updated_at": now},
-            },
-        )
-        item_updates: dict[str, Any] = {
-            "status": "stopped",
-            "error": reason,
-            "completed_at": now,
-            "updated_at": now,
-        }
-        if agent_index is not None:
-            item_updates["agent_index"] = agent_index
-        self._get_collection("process_run_items").update_many(
-            {
-                "process_id": process_id,
-                "raw_url": {"$in": target_urls},
-                "status": {"$in": ["queued", "running", "stop_requested"]},
-            },
-            {"$set": item_updates},
-        )
-
-    async def list_client_jobs_for_process(self, process_id: str, limit: int = 500) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._list_client_jobs_for_process_sync, process_id, limit)
-
-    def _list_client_jobs_for_process_sync(self, process_id: str, limit: int) -> list[dict[str, Any]]:
-        cursor = (
-            self._get_collection("client_jobs")
-            .find({"process_id": process_id}, {"_id": 0})
-            .sort("updated_at", -1)
-            .limit(limit)
-        )
-        return list(cursor)
-
-    async def get_domain(self, domain_key: str) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._get_domain_sync, domain_key)
-
-    def _get_domain_sync(self, domain_key: str) -> dict[str, Any] | None:
-        return self._get_collection("domains").find_one({"domain_key": domain_key}, {"_id": 0})
-
-    async def upsert_domain(self, domain_key: str, updates: dict[str, Any]) -> None:
-        await asyncio.to_thread(self._upsert_domain_sync, domain_key, updates)
-
-    def _upsert_domain_sync(self, domain_key: str, updates: dict[str, Any]) -> None:
-        now = datetime.utcnow()
-        self._get_collection("domains").update_one(
-            {"domain_key": domain_key},
-            {
-                "$set": {
-                    **updates,
-                    "updated_at": now,
+        for key in domain_run_keys:
+            self._get_collection("domain_runs").update_one(
+                {
+                    "process_id": process_id,
+                    "domain_key": key.get("domain_key"),
+                    "career_page_url": key.get("career_page_url"),
+                    "status": {"$in": ["queued", "acquiring_browser", "recovering", "running", "stop_requested"]},
                 },
-                "$setOnInsert": {
-                    "domain_key": domain_key,
-                    "normalized_domain": domain_key,
-                    "created_at": now,
-                },
-            },
-            upsert=True,
-        )
-
-    async def append_domain_history(self, domain_key: str, history_item: dict[str, Any]) -> None:
-        await asyncio.to_thread(self._append_domain_history_sync, domain_key, history_item)
-
-    def _append_domain_history_sync(self, domain_key: str, history_item: dict[str, Any]) -> None:
-        self._get_collection("domains").update_one(
-            {"domain_key": domain_key},
-            {
-                "$push": {
-                    "history": {
-                        "$each": [history_item],
-                        "$slice": -MAX_PROCESS_HISTORY_ENTRIES,
+                {
+                    "$set": {
+                        "status": "stopped",
+                        "error": "Process stop requested.",
+                        "completed_at": now,
+                        "updated_at": now,
                     }
                 },
-                "$set": {"updated_at": datetime.utcnow()},
-                "$setOnInsert": {
-                    "domain_key": domain_key,
-                    "normalized_domain": domain_key,
-                    "created_at": datetime.utcnow(),
-                },
-            },
-            upsert=True,
-        )
+            )
 
-    async def insert_domain_check(self, document: dict[str, Any]) -> None:
-        await asyncio.to_thread(self._insert_domain_check_sync, document)
-
-    def _insert_domain_check_sync(self, document: dict[str, Any]) -> None:
-        self._get_collection("domain_checks").insert_one(document)
-
-    async def get_job_extraction_cache(self, cache_key: str) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._get_job_extraction_cache_sync, cache_key)
-
-    def _get_job_extraction_cache_sync(self, cache_key: str) -> dict[str, Any] | None:
-        return self._get_collection("job_extraction_cache").find_one({"cache_key": cache_key}, {"_id": 0})
-
-    async def upsert_job_extraction_cache(self, cache_key: str, document: dict[str, Any]) -> None:
-        await asyncio.to_thread(self._upsert_job_extraction_cache_sync, cache_key, document)
-
-    def _upsert_job_extraction_cache_sync(self, cache_key: str, document: dict[str, Any]) -> None:
-        now = datetime.utcnow()
-        set_document = dict(document)
-        set_document.pop("cache_key", None)
-        self._get_collection("job_extraction_cache").update_one(
-            {"cache_key": cache_key},
-            {
-                "$set": {
-                    **set_document,
-                    "updated_at": now,
-                },
-                "$setOnInsert": {
-                    "cache_key": cache_key,
-                    "created_at": now,
-                },
-            },
-            upsert=True,
-        )
-
-    async def get_latest_domain_job_snapshot(self, domain_key: str, page_url: str) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._get_latest_domain_job_snapshot_sync, domain_key, page_url)
-
-    def _get_latest_domain_job_snapshot_sync(self, domain_key: str, page_url: str) -> dict[str, Any] | None:
-        return self._get_collection("domain_job_snapshots").find_one(
-            {"domain_key": domain_key, "page_url": page_url},
-            {"_id": 0},
-            sort=[("run_date", DESCENDING), ("created_at", DESCENDING)],
-        )
-
-    async def upsert_domain_job_snapshot(self, snapshot_key: str, document: dict[str, Any]) -> None:
-        await asyncio.to_thread(self._upsert_domain_job_snapshot_sync, snapshot_key, document)
-
-    def _upsert_domain_job_snapshot_sync(self, snapshot_key: str, document: dict[str, Any]) -> None:
-        now = datetime.utcnow()
-        set_document = dict(document)
-        set_document.pop("snapshot_key", None)
-        self._get_collection("domain_job_snapshots").update_one(
-            {"snapshot_key": snapshot_key},
-            {
-                "$set": {
-                    **set_document,
-                    "updated_at": now,
-                },
-                "$setOnInsert": {
-                    "snapshot_key": snapshot_key,
-                    "created_at": now,
-                },
-            },
-            upsert=True,
-        )
-
-    async def upsert_job(self, job_key: str, document: dict[str, Any]) -> None:
-        await asyncio.to_thread(self._upsert_job_sync, job_key, document)
-
-    def _upsert_job_sync(self, job_key: str, document: dict[str, Any]) -> None:
-        now = datetime.utcnow()
-        set_document = dict(document)
-        set_on_insert = {
-            "job_key": job_key,
-            "created_at": now,
-        }
-        if "first_seen_at" in set_document:
-            set_on_insert["first_seen_at"] = set_document.pop("first_seen_at")
-        self._get_collection("jobs").update_one(
-            {"job_key": job_key},
-            {
-                "$set": {
-                    **set_document,
-                    "updated_at": now,
-                },
-                "$setOnInsert": set_on_insert,
-            },
-            upsert=True,
-        )
-
-    async def upsert_client_job(
-        self,
-        *,
-        client_key: str,
-        client_name: str,
-        domain_key: str,
-        raw_url: str,
-        process_id: str,
-        job_key: str,
-        document: dict[str, Any],
-    ) -> None:
-        await asyncio.to_thread(
-            self._upsert_client_job_sync,
-            client_key,
-            client_name,
-            domain_key,
-            raw_url,
-            process_id,
-            job_key,
-            document,
-        )
-
-    def _upsert_client_job_sync(
-        self,
-        client_key: str,
-        client_name: str,
-        domain_key: str,
-        raw_url: str,
-        process_id: str,
-        job_key: str,
-        document: dict[str, Any],
-    ) -> None:
-        now = datetime.utcnow()
-        set_document = dict(document)
-        set_on_insert = {
-            "client_key": client_key,
-            "domain_key": domain_key,
-            "job_key": job_key,
-            "created_at": now,
-        }
-        if "first_seen_for_client_at" in set_document:
-            set_on_insert["first_seen_for_client_at"] = set_document.pop("first_seen_for_client_at")
-        self._get_collection("client_jobs").update_one(
-            {
-                "client_key": client_key,
-                "domain_key": domain_key,
-                "job_key": job_key,
-            },
-            {
-                "$set": {
-                    **set_document,
-                    "client_name": client_name,
-                    "raw_url": raw_url,
-                    "process_id": process_id,
-                    "updated_at": now,
-                },
-                "$setOnInsert": set_on_insert,
-            },
-            upsert=True,
-        )
+    def _fingerprint_payload(self, payload: Any) -> str:
+        serialized = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+        return xxhash.xxh64(serialized).hexdigest()

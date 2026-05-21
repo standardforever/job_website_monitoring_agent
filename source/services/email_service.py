@@ -48,11 +48,8 @@ IMPORTANT_CSV_FIELDS = [
     "career_page_overview_outcome",
     "career_page_overview_outcome_reason",
     "career_page_overview_job_found_on_urls",
-    "ats_detected",
-    "ats_provider",
-    "ats_confidence",
-    "ats_detection_method",
-    "ats_reason",
+    "extracted_job_count",
+    "new_job_count",
 ]
 
 ROLES_CSV_FIELDS = [
@@ -100,14 +97,6 @@ def _flatten_csv_list(values: Any) -> str:
     return " | ".join(value for value in flattened if value)
 
 
-def _extract_ats_reason(ats_detection: dict[str, Any]) -> str | None:
-    return (
-        ats_detection.get("reasoning")
-        or ats_detection.get("non_ats_reason")
-        or ats_detection.get("detection_reason")
-    )
-
-
 def _build_career_outcome_reason_with_pagination(career_overview: dict[str, Any]) -> str | None:
     reason = str(career_overview.get("outcome_reason") or "").strip() or None
     listing_ui = career_overview.get("listing_ui")
@@ -128,7 +117,6 @@ def build_process_important_csv_rows(process: dict[str, Any]) -> list[dict[str, 
         career_page_result = dict(result_payload.get("career_page_result") or {})
         result_summary = dict(item.get("result_summary") or {})
         career_overview = dict(career_page_result.get("overview") or {})
-        ats_detection = dict(result_payload.get("ats_detection") or {})
         rows.append(
             {
                 "client_name": process.get("client_name"),
@@ -138,11 +126,8 @@ def build_process_important_csv_rows(process: dict[str, Any]) -> list[dict[str, 
                 "career_page_overview_outcome": career_overview.get("outcome"),
                 "career_page_overview_outcome_reason": _build_career_outcome_reason_with_pagination(career_overview),
                 "career_page_overview_job_found_on_urls": _flatten_csv_list(career_overview.get("job_found_on_urls")),
-                "ats_detected": ats_detection.get("ats_detected"),
-                "ats_provider": ats_detection.get("ats_provider"),
-                "ats_confidence": ats_detection.get("confidence"),
-                "ats_detection_method": ats_detection.get("detection_method"),
-                "ats_reason": _extract_ats_reason(ats_detection),
+                "extracted_job_count": result_summary.get("extracted_job_count"),
+                "new_job_count": result_summary.get("new_job_count"),
             }
         )
     return rows
@@ -364,7 +349,7 @@ def build_html_email(body: str) -> str:
         <html lang="en">
           <body style="margin:0;padding:0;background:#f5f7fa;font-family:Arial,Helvetica,sans-serif;color:#172033;">
             <div style="display:none;max-height:0;overflow:hidden;color:transparent;">
-              Your ProcessZero job monitoring report is ready.
+              Your ProcessZero career page job report is ready.
             </div>
 
             <div style="max-width:720px;margin:0 auto;padding:32px 18px;">
@@ -373,7 +358,7 @@ def build_html_email(body: str) -> str:
                   ProcessZero
                 </div>
                 <h1 style="margin:8px 0 0;font-size:26px;line-height:1.25;font-weight:700;">
-                  Job monitoring report
+                  Career page job report
                 </h1>
               </div>
 
@@ -437,8 +422,6 @@ def send_email(
     api_key: str | None = None,
 ) -> dict[str, Any]:
     api_key = api_key or os.getenv("RESEND_API_KEY")
-    # print(api_key, from_email)
-    # print('\n\n\n\n\n')
     clean_to = [email.strip() for email in to if email and email.strip()]
     if not api_key:
         raise RuntimeError("RESEND_API_KEY is not set.")
@@ -556,10 +539,12 @@ class EmailService:
         subject = f"{subject_prefix} Process {process_id} {status_label}".strip()
         body = (
             f"Hello {client.get('client_name') or 'there'},\n\n"
-            f"Your job monitoring process has {status_label}.\n\n"
+            f"Your career page job extraction process has {status_label}.\n\n"
             f"Process ID: {process_id}\n"
             f"Status: {status}\n"
-            f"Total URLs: {summary.get('total_urls')}\n"
+            f"Total domains: {summary.get('total_domain_count')}\n"
+            f"Jobs found: {summary.get('job_count')}\n"
+            f"New jobs: {summary.get('new_job_count')}\n"
             f"Completed domains: {summary.get('completed_domain_count')}\n"
             f"Failed domains: {summary.get('failed_domain_count')}\n\n"
             "The attached zip contains two CSV files: the important process summary and the roles found."

@@ -3,7 +3,7 @@ from playwright.async_api import Page
 from utils.domain_name_filters import URLFilter
 from services.flow_safety import extract_base_domain
 from services.navigation import handle_security_interstitial
-import tldextract
+from utils import tld
 from urllib.parse import urlparse, urlunparse
 import asyncio
 
@@ -185,7 +185,7 @@ class UrlExtractor:
     # -------------------------------------------------------------------------
 
     def normalize_domain(self, url: str) -> str:
-        ext = tldextract.extract(url)
+        ext = tld.extract(url)
         return f"{ext.domain}.{ext.suffix}".lower()
 
     def _normalize_url_for_same_site_compare(self, raw_url: str | None) -> str:
@@ -410,12 +410,12 @@ class UrlExtractor:
             )
 
             # Filter out any URL whose domain matches base_domain
-            base_ext = tldextract.extract(base_domain)
+            base_ext = tld.extract(base_domain)
             base_root = f"{base_ext.domain}.{base_ext.suffix}".lower()
 
             external_career_urls = []
             for item in (raw or []):
-                href_ext = tldextract.extract(item["url"])
+                href_ext = tld.extract(item["url"])
                 href_root = f"{href_ext.domain}.{href_ext.suffix}".lower()
                 if href_root != base_root:
                     external_career_urls.append(item)
