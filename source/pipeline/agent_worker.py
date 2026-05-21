@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Callable
 
 from browser.session_manager import AgentSessionRecoveryNeeded, BrowserSessionManager, SharedSessionRuntime
@@ -68,7 +69,6 @@ class AgentWorker:
                 )
                 break
             record = await self._process_with_recovery(process_id, domain, agent_index, runtime)
-            await self._record_assignment_domain_progress(process_id, agent_index, domain, record)
             domain_results.append(record)
             processed.append(domain["domain_key"])
             processed_keys.add(self._domain_run_key(domain))
@@ -89,10 +89,13 @@ class AgentWorker:
         for attempt in range(3):
             browser_session = None
             try:
-                browser_session, agent_tab = await self._browser_manager.open_agent_tab(
-                    runtime=runtime,
-                    agent_index=agent_index,
-                    url=domain["domain"],
+                browser_session, agent_tab = await asyncio.wait_for(
+                    self._browser_manager.open_agent_tab(
+                        runtime=runtime,
+                        agent_index=agent_index,
+                        url=domain["domain"],
+                    ),
+                    timeout=60,
                 )
                 record = await self._process_domain_with_timeout(
                     process_id,
@@ -120,8 +123,6 @@ class AgentWorker:
         agent_index: int,
         agent_tab: dict[str, Any],
     ) -> dict[str, Any]:
-        import asyncio
-
         timeout_seconds = max(60, int(get_settings().domain_process_timeout_seconds))
         return await asyncio.wait_for(
             self._domain_processor.process(
@@ -166,18 +167,6 @@ class AgentWorker:
             process_id,
             [{"domain_key": domain.get("domain_key"), "career_page_url": domain.get("career_page_url")} for domain in domains],
         )
-
-    async def _record_assignment_domain_progress(
-        self,
-        process_id: str,
-        agent_index: int,
-        domain: dict[str, Any],
-        record: dict[str, Any],
-    ) -> None:
-        status = str(record.get("status") or "").strip().lower()
-        if status not in {"completed", "failed"}:
-            return
-        await self._mongodb_service.update_assignment_domain_progress(process_id, agent_index, domain, status)
 
     def _worker_result(
         self,

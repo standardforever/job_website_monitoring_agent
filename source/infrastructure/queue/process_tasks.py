@@ -17,7 +17,7 @@ from infrastructure.queue.heartbeat import (
 )
 from infrastructure.queue.recovery import recover_and_requeue_interrupted_processes
 from pipeline.exceptions import BrowserCapacityUnavailable, BrowserSessionLost
-from services.grid_session import is_grid_session_active_async
+from services.grid_session import close_session_via_http_async, is_grid_session_active_async
 from services.mongodb_service import MongoDBService
 from tasks.process_tasks import process_task_service
 from utils.logging import configure_logging, get_logger, log_event
@@ -150,7 +150,7 @@ async def _execute_with_browser_monitor(process_id: str, process: dict[str, Any]
     monitor_task = asyncio.create_task(_monitor_browser_session(process_id, browser_runtime))
     done, pending = await asyncio.wait(
         {execution_task, monitor_task},
-        return_when=asyncio.FIRST_EXCEPTION,
+        return_when=asyncio.FIRST_COMPLETED,
     )
     for task in done:
         exc = task.exception()
@@ -233,9 +233,17 @@ async def _watchdog_dead_processes() -> dict[str, Any]:
         if redis_client.exists(key):
             continue
 
+        metadata = process.get("metadata") or {}
+        orphaned_session_id = metadata.get("active_browser_session_id")
+        orphaned_grid_url = metadata.get("active_grid_url") or None
+
         recovered = await mongodb_service.recover_process_missing_heartbeat(process_id)
         if recovered is None or recovered.get("recovered_status") != "queued":
             continue
+
+        if orphaned_session_id:
+            await close_session_via_http_async(orphaned_grid_url, orphaned_session_id)
+
         from infrastructure.queue.dispatcher import enqueue_process_execution
 
         celery_task_id = enqueue_process_execution(process_id)
@@ -285,7 +293,6 @@ async def _mark_process_failed(process_id: str, error: str, task_id: str | None)
             error,
             result_payload={"status": "failed", "error": error},
         )
-    await mongodb_service.rebuild_assignment_progress(process_id)
     await mongodb_service.update_process_upload(
         process_id,
         {

@@ -8,8 +8,8 @@ WORKDIR /app
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential \
-        curl \
+    build-essential \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -19,4 +19,4 @@ COPY source ./source
 
 EXPOSE 8110
 
-CMD ["uvicorn", "app:app", "--app-dir", "source", "--host", "0.0.0.0", "--port", "8110"]
+CMD ["uvicorn", "app:app", "--app-dir", "source", "--host", "0.0.0.0", "--port", "8110", "--reload"]

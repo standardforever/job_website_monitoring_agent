@@ -107,6 +107,13 @@ class JobProcessService:
         if running_process is None:
             await self._browser_manager.close_process_session(browser_runtime)
             raise BrowserCapacityUnavailable("Process changed state before browser acquisition completed")
+        await self._mongodb_service.update_process_upload(
+            process_id,
+            {
+                "metadata.active_browser_session_id": browser_runtime.session_id,
+                "metadata.active_grid_url": browser_runtime.grid_url or "",
+            },
+        )
         return running_process, browser_runtime
 
     async def execute_process_with_browser(self, process: dict[str, Any], browser_runtime: Any) -> dict[str, Any]:
@@ -313,31 +320,13 @@ def allocate_domains_to_agents(domains: list[dict[str, Any]], agent_count: int) 
         {
             "agent_index": index,
             "domains": [],
-            "processed_domain": [],
-            "pending_domain": [],
-            "failed_domain": [],
             "status": "queued",
         }
         for index in range(normalized_agent_count)
     ]
     for index, domain in enumerate(domains):
-        assignment = assignments[index % normalized_agent_count]
-        assignment["domains"].append(domain)
-        assignment["pending_domain"].append(_assignment_domain_ref(domain))
-    return [
-        assignment
-        for assignment in assignments
-        if assignment["domains"]
-    ]
-
-
-def _assignment_domain_ref(domain: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "input_index": domain.get("input_index"),
-        "domain": domain.get("domain"),
-        "domain_key": domain.get("domain_key"),
-        "career_page_url": domain.get("career_page_url"),
-    }
+        assignments[index % normalized_agent_count]["domains"].append(domain)
+    return [assignment for assignment in assignments if assignment["domains"]]
 
 
 def paginated_processes(processes: list[dict[str, Any]], total: int, page: int, page_size: int) -> dict[str, Any]:

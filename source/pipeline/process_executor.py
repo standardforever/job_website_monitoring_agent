@@ -152,7 +152,6 @@ class ProcessExecutor:
             records = []
             for domain in unfinished_domains:
                 record = await self._worker._mark_recovery_failed(process_id, domain, error)
-                await self._mongodb_service.update_assignment_domain_progress(process_id, agent_index, domain, "failed")
                 records.append(record)
             await self._mongodb_service.update_assignment_status(process_id, agent_index, "completed")
             log_event(
@@ -263,6 +262,7 @@ class ProcessExecutor:
                         "previous_job_keys": self._previous_job_keys(existing_runs, domain),
                     }
                     for domain in list(assignment.get("domains") or [])
+                    if _domain_needs_processing(existing_runs, domain)
                 ],
             }
             for assignment in assignments
@@ -283,7 +283,6 @@ class ProcessExecutor:
                 error,
                 result_payload={"status": "failed", "error": error},
             )
-        await self._mongodb_service.rebuild_assignment_progress(process_id)
         summary = failed_summary(len(domains), len(assignments))
         await self._mongodb_service.update_process_upload(
             process_id,
@@ -328,3 +327,8 @@ def _process_worker_id(process: dict[str, Any]) -> str | None:
     metadata = process.get("metadata") if isinstance(process.get("metadata"), dict) else {}
     worker_id = metadata.get("worker_id")
     return str(worker_id) if worker_id else None
+
+
+def _domain_needs_processing(existing_runs: dict[tuple, dict], domain: dict[str, Any]) -> bool:
+    run = existing_runs.get((domain.get("domain_key"), domain.get("career_page_url")))
+    return run is None or str(run.get("status") or "") != "completed"
