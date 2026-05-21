@@ -16,7 +16,7 @@ from infrastructure.queue.recovery import recover_and_requeue_interrupted_proces
 from services.mongodb_service import MongoDBService
 from utils.logging import get_logger, log_event
 
-app = FastAPI(title="Career Page Job Extractor", root_path="")
+app = FastAPI(title="Job Monitoring Agent", root_path="/ats")
 logger = get_logger("app")
 ui_directory = Path(__file__).resolve().parent / "ui"
 mongodb_service = MongoDBService()
