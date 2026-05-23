@@ -14,7 +14,7 @@ from models.process import ClientRegistrationRequest, ClientUpdateRequest, JobPr
 from services.email_service import (
     IMPORTANT_CSV_FIELDS,
     ROLES_CSV_FIELDS,
-    build_process_csv_bundle_attachment,
+    # build_process_csv_bundle_attachment,
     build_process_important_csv_rows,
     build_process_roles_csv_rows,
 )
@@ -232,7 +232,7 @@ async def create_process_from_file(
 
 
 @router.get("/processes")
-async def list_processes(client_name: str | None = None, page: int = 1, page_size: int = 10) -> dict[str, Any]:
+async def list_processes(client_name: str | None = None, page: int = 1, page_size: int = 20) -> dict[str, Any]:
     log_event(
         logger,
         "info",
@@ -304,14 +304,14 @@ async def get_process_roles_csv(process_id: str) -> StreamingResponse:
     )
 
 
-@router.get("/processes/{process_id}/csv-bundle.zip")
-async def download_process_csv_bundle(process_id: str) -> StreamingResponse:
-    process = await job_process_service.get_process(process_id)
-    if process is None:
-        raise HTTPException(status_code=404, detail="Process not found")
-    attachment = build_process_csv_bundle_attachment(process)
-    return StreamingResponse(
-        iter([attachment.content]),
-        media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{attachment.filename}"'},
-    )
+# @router.get("/processes/{process_id}/csv-bundle.zip")
+# async def download_process_csv_bundle(process_id: str) -> StreamingResponse:
+#     process = await job_process_service.get_process(process_id)
+#     if process is None:
+#         raise HTTPException(status_code=404, detail="Process not found")
+#     attachment = build_process_csv_bundle_attachment(process)
+#     return StreamingResponse(
+#         iter([attachment.content]),
+#         media_type="application/zip",
+#         headers={"Content-Disposition": f'attachment; filename="{attachment.filename}"'},
+#     )

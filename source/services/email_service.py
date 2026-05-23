@@ -9,7 +9,6 @@ import io
 import json
 import mimetypes
 import os
-import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -24,7 +23,7 @@ from utils.logging import get_logger, log_event
 logger = get_logger("email_service")
 
 API_URL = "https://api.resend.com/emails"
-ALLOWED_EXTENSIONS = {".pdf", ".csv", ".zip", '.xlml'}
+ALLOWED_EXTENSIONS = {".pdf", ".csv", ".xlml"}
 
 
 @dataclass(slots=True)
@@ -316,24 +315,21 @@ def build_process_roles_csv_rows(process: dict[str, Any]) -> list[dict[str, Any]
     return rows
 
 
-def build_process_csv_bundle_attachment(process: dict[str, Any]) -> EmailAttachment:
+def build_process_csv_attachments(process: dict[str, Any]) -> list[EmailAttachment]:
     process_id = str(process.get("process_id") or "process").strip() or "process"
     safe_process_id = _safe_filename(process_id)
-    bundle = io.BytesIO()
-    with zipfile.ZipFile(bundle, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(
-            f"process_{safe_process_id}_important.csv",
-            _csv_content(build_process_important_csv_rows(process), IMPORTANT_CSV_FIELDS),
-        )
-        archive.writestr(
-            f"process_{safe_process_id}_roles.csv",
-            _csv_content(build_process_roles_csv_rows(process), ROLES_CSV_FIELDS),
-        )
-    return EmailAttachment(
-        filename=f"process_{safe_process_id}_csv_bundle.zip",
-        content=bundle.getvalue(),
-        content_type="application/zip",
-    )
+    return [
+        EmailAttachment(
+            filename=f"process_{safe_process_id}_important.csv",
+            content=_csv_content(build_process_important_csv_rows(process), IMPORTANT_CSV_FIELDS).encode(),
+            content_type="text/csv",
+        ),
+        EmailAttachment(
+            filename=f"process_{safe_process_id}_roles.csv",
+            content=_csv_content(build_process_roles_csv_rows(process), ROLES_CSV_FIELDS).encode(),
+            content_type="text/csv",
+        ),
+    ]
 
 
 def build_html_email(body: str) -> str:
@@ -547,11 +543,11 @@ class EmailService:
             f"New jobs: {summary.get('new_job_count')}\n"
             f"Completed domains: {summary.get('completed_domain_count')}\n"
             f"Failed domains: {summary.get('failed_domain_count')}\n\n"
-            "The attached zip contains two CSV files: the important process summary and the roles found."
+            "Attached are two CSV files: the process summary and the roles found."
         )
 
         try:
-            attachment = build_process_csv_bundle_attachment(process)
+            attachments = build_process_csv_attachments(process)
             result = send_email(
                 from_email=self._settings.email_from_address,
                 from_name=self._settings.email_from_name,
@@ -559,7 +555,7 @@ class EmailService:
                 to=[client_email],
                 subject=subject,
                 body=body,
-                attachments=[attachment],
+                attachments=attachments,
                 api_key=self._settings.resend_api_key,
             )
             return {"status": "sent", "provider_response": result}
