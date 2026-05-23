@@ -14,7 +14,6 @@ from models.process import ClientRegistrationRequest, ClientUpdateRequest, JobPr
 from services.email_service import (
     IMPORTANT_CSV_FIELDS,
     ROLES_CSV_FIELDS,
-    # build_process_csv_bundle_attachment,
     build_process_important_csv_rows,
     build_process_roles_csv_rows,
 )
@@ -79,12 +78,7 @@ def _validate_admin_password(x_registration_password: str | None) -> None:
 
 
 def _maybe_run_in_background(background_tasks: BackgroundTasks, process_id: str) -> None:
-    if settings.process_execution_mode == "background":
-        background_tasks.add_task(execute_process_task, process_id)
-    elif settings.process_execution_mode == "celery":
-        from infrastructure.queue.dispatcher import enqueue_process_execution
-
-        enqueue_process_execution(process_id)
+    background_tasks.add_task(execute_process_task, process_id)
 
 
 @router.get("/health")

@@ -256,7 +256,8 @@ function renderProcesses(payload) {
           </div>
           <div class="process-actions">
             <a class="button button-secondary" href="${buildApiUrl(`processes/${processId}`)}" download>JSON</a>
-            <a class="button button-secondary" href="${buildApiUrl(`processes/${processId}/csv-bundle.zip`)}" download>CSV Bundle</a>
+            <a class="button button-secondary" href="${buildApiUrl(`processes/${processId}/important.csv`)}" download>Important CSV</a>
+            <a class="button button-secondary" href="${buildApiUrl(`processes/${processId}/important-roles.csv`)}" download>Roles CSV</a>
             ${rerunButton}
             ${stopButton}
           </div>

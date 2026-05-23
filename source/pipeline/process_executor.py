@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime
 from typing import Any, Callable
 
@@ -8,7 +7,6 @@ from browser.session_manager import BrowserSessionManager
 from core.config import get_settings
 from pipeline.agent_worker import AgentWorker
 from pipeline.domain_processor import DomainProcessor
-from pipeline.exceptions import BrowserCapacityUnavailable
 from pipeline.process_summary import build_process_summary_from_domain_runs, derive_status_from_summary, failed_summary
 from services.mongodb_service import MongoDBService
 from services.openai_service import reset_openai_runtime_config, set_openai_runtime_config
@@ -41,71 +39,28 @@ class ProcessExecutor:
         if process is None:
             return await self.skipped_or_invalid_process(process_id)
 
-        worker_id = _process_worker_id(process)
-        heartbeat_stop = asyncio.Event()
-        heartbeat_task = asyncio.create_task(self._heartbeat_until_stopped(process_id, heartbeat_stop, worker_id))
         client = await self._mongodb_service.get_client(str(process.get("client_key") or ""))
         runtime_tokens = self._set_runtime_config(client, process)
         browser_runtime = None
         try:
             domains, assignments = self._domains_and_assignments(process)
             self._log_started(process_id, domains, assignments)
-            grid_url = self._configured_grid_url()
+            grid_url = self._client_grid_url(client)
             browser_runtime = await self._browser_manager.create_process_session(grid_url)
             if browser_runtime is None:
-                retry_delay = get_settings().browser_session_retry_delay_seconds
-                error = "Browser capacity is not available yet"
-                await self._mongodb_service.release_process_for_browser_retry(process_id, error, retry_delay)
-                log_event(
-                    logger,
-                    "warning",
-                    "process_waiting_for_browser_capacity process_id=%s retry_delay_seconds=%s",
-                    process_id,
-                    retry_delay,
-                    domain=process_id,
-                    process_id=process_id,
-                    retry_delay_seconds=retry_delay,
-                )
-                raise BrowserCapacityUnavailable(error)
+                error = "Browser capacity is not available"
+                return await self._fail_startup(process_id, process, error)
             running_process = await self._mongodb_service.mark_process_running(process_id)
             if running_process is None:
-                raise BrowserCapacityUnavailable("Process changed state before browser acquisition completed")
+                error = "Process changed state before browser acquisition completed"
+                return await self._fail_startup(process_id, process, error)
             process = {**process, **running_process}
 
-            worker_results = await asyncio.gather(
-                *[
-                    self._run_assignment(process_id, assignment, browser_runtime)
-                    for assignment in self._hydrate_assignments(process, assignments)
-                ]
-            )
+            worker_results = await self._run_assignments(process_id, assignments, process, browser_runtime)
             return await self._complete_process(process_id, domains, assignments, worker_results)
         finally:
-            heartbeat_stop.set()
-            await self._stop_heartbeat(heartbeat_task)
             reset_openai_runtime_config(runtime_tokens)
             await self._browser_manager.close_process_session(browser_runtime)
-
-    async def execute_with_browser(self, process: dict[str, Any], browser_runtime: Any) -> dict[str, Any]:
-        process_id = str(process["process_id"])
-        worker_id = _process_worker_id(process)
-        heartbeat_stop = asyncio.Event()
-        heartbeat_task = asyncio.create_task(self._heartbeat_until_stopped(process_id, heartbeat_stop, worker_id))
-        client = await self._mongodb_service.get_client(str(process.get("client_key") or ""))
-        runtime_tokens = self._set_runtime_config(client, process)
-        try:
-            domains, assignments = self._domains_and_assignments(process)
-            self._log_started(process_id, domains, assignments)
-            worker_results = await asyncio.gather(
-                *[
-                    self._run_assignment(process_id, assignment, browser_runtime)
-                    for assignment in self._hydrate_assignments(process, assignments)
-                ]
-            )
-            return await self._complete_process(process_id, domains, assignments, worker_results)
-        finally:
-            heartbeat_stop.set()
-            await self._stop_heartbeat(heartbeat_task)
-            reset_openai_runtime_config(runtime_tokens)
 
     async def skipped_or_invalid_process(self, process_id: str) -> dict[str, Any]:
         current_process = await self._mongodb_service.get_process_with_domains(process_id)
@@ -132,6 +87,21 @@ class ProcessExecutor:
                 "skip_reason": f"Process is already {status}.",
             }
         raise ValueError(f"Process {process_id} is not executable from status {status or 'unknown'}")
+
+    async def _run_assignments(
+        self,
+        process_id: str,
+        assignments: list[dict[str, Any]],
+        process: dict[str, Any],
+        browser_runtime: Any,
+    ) -> list[dict[str, Any]]:
+        import asyncio
+        return await asyncio.gather(
+            *[
+                self._run_assignment(process_id, assignment, browser_runtime)
+                for assignment in self._hydrate_assignments(process, assignments)
+            ]
+        )
 
     async def _run_assignment(self, process_id: str, assignment: dict[str, Any], browser_runtime: Any) -> dict[str, Any]:
         try:
@@ -190,35 +160,6 @@ class ProcessExecutor:
             not in completed_statuses
         ]
 
-    async def _heartbeat_until_stopped(self, process_id: str, stop_event: asyncio.Event, worker_id: str | None) -> None:
-        interval = max(5, int(get_settings().process_heartbeat_interval_seconds))
-        while not stop_event.is_set():
-            try:
-                await self._mongodb_service.heartbeat_process(process_id, "executing", worker_id)
-            except Exception as exc:
-                log_event(
-                    logger,
-                    "warning",
-                    "process_heartbeat_failed process_id=%s error=%s",
-                    process_id,
-                    exc,
-                    domain=process_id,
-                    process_id=process_id,
-                    error=str(exc),
-                )
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=interval)
-            except asyncio.TimeoutError:
-                continue
-
-    async def _stop_heartbeat(self, heartbeat_task: asyncio.Task) -> None:
-        if heartbeat_task.done():
-            return
-        try:
-            await asyncio.wait_for(heartbeat_task, timeout=5)
-        except asyncio.TimeoutError:
-            heartbeat_task.cancel()
-
     def _set_runtime_config(self, client: dict[str, Any] | None, process: dict[str, Any]):
         metadata = dict(process.get("metadata") or {})
         return set_openai_runtime_config(
@@ -226,8 +167,9 @@ class ProcessExecutor:
             model=(client or {}).get("model") or metadata.get("client_model") or "gpt-5-nano",
         )
 
-    def _configured_grid_url(self) -> str | None:
-        return str(get_settings().selenium_remote_url or "").strip() or None
+    def _client_grid_url(self, client: dict[str, Any] | None) -> str | None:
+        client_url = str((client or {}).get("grid_url") or "").strip()
+        return client_url or str(get_settings().selenium_remote_url or "").strip() or None
 
     def _domains_and_assignments(self, process: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         domains = list(process.get("domains") or [])
@@ -321,12 +263,6 @@ class ProcessExecutor:
             },
         )
         return {"process_id": process_id, "status": status, "errors": errors, "worker_results": worker_results, "summary": summary}
-
-
-def _process_worker_id(process: dict[str, Any]) -> str | None:
-    metadata = process.get("metadata") if isinstance(process.get("metadata"), dict) else {}
-    worker_id = metadata.get("worker_id")
-    return str(worker_id) if worker_id else None
 
 
 def _domain_needs_processing(existing_runs: dict[tuple, dict], domain: dict[str, Any]) -> bool:

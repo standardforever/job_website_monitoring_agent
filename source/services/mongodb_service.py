@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 import xxhash
@@ -360,102 +360,6 @@ class MongoDBService:
             update_fields=sorted(updates.keys()),
         )
 
-    async def heartbeat_process(self, process_id: str, state: str, worker_id: str | None = None) -> None:
-        await asyncio.to_thread(self._heartbeat_process_sync, process_id, state, worker_id)
-
-    def _heartbeat_process_sync(self, process_id: str, state: str, worker_id: str | None) -> None:
-        now = datetime.utcnow()
-        query: dict[str, Any] = {
-            "process_id": process_id,
-            "status": {"$in": ["acquiring_browser", "recovering", "running", "stop_requested"]},
-        }
-        if worker_id:
-            query["metadata.worker_id"] = worker_id
-        self._get_collection("process_uploads").update_one(
-            query,
-            {
-                "$set": {
-                    "updated_at": now,
-                    "metadata.heartbeat_at": now,
-                    "metadata.heartbeat_state": state,
-                }
-            },
-        )
-
-    async def release_process_for_browser_retry(self, process_id: str, error: str, retry_delay_seconds: int) -> None:
-        await asyncio.to_thread(self._release_process_for_browser_retry_sync, process_id, error, retry_delay_seconds)
-
-    def _release_process_for_browser_retry_sync(self, process_id: str, error: str, retry_delay_seconds: int) -> None:
-        now = datetime.utcnow()
-        retry_delay = max(1, int(retry_delay_seconds))
-        recovery_grace = max(1, int(get_settings().process_recovery_queued_after_seconds))
-        retry_reserved_until = now + timedelta(seconds=retry_delay + recovery_grace)
-        updates = {
-            "$set": {
-                "status": "queued",
-                "started_at": None,
-                "updated_at": now,
-                "metadata.capacity_state": "waiting_for_browser",
-                "metadata.last_browser_acquire_error": error,
-                "metadata.last_browser_wait_at": now,
-                "metadata.next_browser_retry_after_seconds": retry_delay,
-                "metadata.next_browser_retry_at": now + timedelta(seconds=retry_delay),
-                "metadata.requeue_claimed_at": retry_reserved_until,
-            },
-            "$inc": {"metadata.browser_acquire_attempt_count": 1},
-            "$unset": {"metadata.claimed_at": "", "metadata.worker_id": ""},
-        }
-        self._get_collection("process_uploads").update_one(
-            {"process_id": process_id, "status": {"$in": ["acquiring_browser", "running"]}},
-            updates,
-        )
-        log_event(
-            logger,
-            "info",
-            "mongodb_release_process_for_browser_retry process_id=%s retry_delay_seconds=%s",
-            process_id,
-            retry_delay,
-            domain="mongodb",
-            process_id=process_id,
-            retry_delay_seconds=retry_delay,
-            requeue_claimed_until=retry_reserved_until.isoformat(),
-        )
-
-    async def claim_next_queued_process(self, worker_id: str | None = None) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._claim_next_queued_process_sync, worker_id)
-
-    def _claim_next_queued_process_sync(self, worker_id: str | None) -> dict[str, Any] | None:
-        now = datetime.utcnow()
-        resolved_worker_id = worker_id or os.getenv("WORKER_ID") or os.uname().nodename
-        claimed = self._get_collection("process_uploads").find_one_and_update(
-            {"status": "queued"},
-            {
-                "$set": {
-                    "status": "acquiring_browser",
-                    "started_at": None,
-                    "updated_at": now,
-                    "metadata.worker_id": resolved_worker_id,
-                    "metadata.claimed_at": now,
-                    "metadata.capacity_state": "acquiring_browser",
-                }
-            },
-            sort=[("created_at", ASCENDING)],
-            projection={"_id": 0},
-            return_document=ReturnDocument.AFTER,
-        )
-        if claimed:
-            log_event(
-                logger,
-                "info",
-                "mongodb_claim_next_queued_process process_id=%s worker_id=%s",
-                claimed.get("process_id"),
-                resolved_worker_id,
-                domain="mongodb",
-                process_id=claimed.get("process_id"),
-                worker_id=resolved_worker_id,
-            )
-        return claimed
-
     async def begin_process_execution(self, process_id: str, worker_id: str | None = None) -> dict[str, Any] | None:
         return await asyncio.to_thread(self._begin_process_execution_sync, process_id, worker_id)
 
@@ -531,337 +435,6 @@ class MongoDBService:
             {"$set": {"status": "stop_requested", "updated_at": now}},
         )
         return self._get_process_upload_sync(process_id)
-
-    async def recover_interrupted_processes(self, *, stale_after_seconds: int) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._recover_interrupted_processes_sync, stale_after_seconds)
-
-    async def list_running_processes(self) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._list_running_processes_sync)
-
-    def _list_running_processes_sync(self) -> list[dict[str, Any]]:
-        return list(
-            self._get_collection("process_uploads").find(
-                {"status": "running"},
-                {
-                    "_id": 0,
-                    "process_id": 1,
-                    "status": 1,
-                    "metadata.worker_id": 1,
-                    "metadata.active_browser_session_id": 1,
-                    "metadata.active_grid_url": 1,
-                    "updated_at": 1,
-                },
-            )
-        )
-
-    async def recover_process_missing_heartbeat(self, process_id: str) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._recover_process_missing_heartbeat_sync, process_id)
-
-    async def recover_process_lost_browser(self, process_id: str, error: str) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._recover_process_lost_browser_sync, process_id, error)
-
-    def _recover_process_lost_browser_sync(self, process_id: str, error: str) -> dict[str, Any] | None:
-        now = datetime.utcnow()
-        process = self._get_collection("process_uploads").find_one_and_update(
-            {"process_id": process_id, "status": "running"},
-            {
-                "$set": {
-                    "status": "recovering",
-                    "updated_at": now,
-                    "metadata.recovery_claimed_at": now,
-                    "metadata.recovery_previous_status": "running",
-                    "metadata.recovery_reason": "browser_session_lost",
-                    "metadata.last_browser_session_error": error,
-                }
-            },
-            projection={"_id": 0},
-            return_document=ReturnDocument.BEFORE,
-        )
-        if process is None:
-            return None
-        recovered = self._recover_stale_running_process(process, now)
-        self._get_collection("process_uploads").update_one(
-            {"process_id": process_id},
-            {
-                "$set": {
-                    "metadata.recovery_reason": "browser_session_lost",
-                    "metadata.recovered_after_browser_loss": True,
-                    "metadata.last_browser_session_error": error,
-                }
-            },
-        )
-        log_event(
-            logger,
-            "warning",
-            "mongodb_recover_process_lost_browser process_id=%s error=%s",
-            process_id,
-            error,
-            domain="mongodb",
-            process_id=process_id,
-            error=error,
-        )
-        return recovered
-
-    def _recover_process_missing_heartbeat_sync(self, process_id: str) -> dict[str, Any] | None:
-        now = datetime.utcnow()
-        process = self._get_collection("process_uploads").find_one_and_update(
-            {"process_id": process_id, "status": "running"},
-            {
-                "$set": {
-                    "status": "recovering",
-                    "updated_at": now,
-                    "metadata.recovery_claimed_at": now,
-                    "metadata.recovery_previous_status": "running",
-                    "metadata.recovery_reason": "missing_redis_heartbeat",
-                }
-            },
-            projection={"_id": 0},
-            return_document=ReturnDocument.BEFORE,
-        )
-        if process is None:
-            return None
-        recovered = self._recover_stale_running_process(process, now)
-        self._get_collection("process_uploads").update_one(
-            {"process_id": process_id},
-            {
-                "$set": {
-                    "metadata.recovery_reason": "missing_redis_heartbeat",
-                    "metadata.recovered_by_watchdog": True,
-                }
-            },
-        )
-        return recovered
-
-    def _recover_interrupted_processes_sync(self, stale_after_seconds: int) -> list[dict[str, Any]]:
-        now = datetime.utcnow()
-        stale_before = now - timedelta(seconds=max(1, int(stale_after_seconds)))
-        candidates = list(
-            self._get_collection("process_uploads").find(
-                {
-                    "status": {"$in": ["acquiring_browser", "running", "stop_requested", "recovering"]},
-                    "updated_at": {"$lte": stale_before},
-                },
-                {"_id": 0},
-            )
-        )
-        recovered: list[dict[str, Any]] = []
-        for candidate in candidates:
-            process_id = candidate.get("process_id")
-            if not process_id:
-                continue
-            process = self._claim_stale_process_for_recovery(
-                str(process_id),
-                str(candidate.get("status") or ""),
-                stale_before,
-                now,
-            )
-            if process is None:
-                continue
-            metadata = dict(process.get("metadata") or {})
-            previous_status = str(
-                metadata.get("recovery_previous_status")
-                if process.get("status") == "recovering"
-                else process.get("status")
-            )
-            if previous_status == "stop_requested":
-                recovered.append(self._recover_stale_stop_requested_process(process, now))
-            elif previous_status == "acquiring_browser":
-                recovered.append(self._recover_stale_acquiring_browser_process(process, now))
-            else:
-                recovered.append(self._recover_stale_running_process(process, now))
-        if recovered:
-            log_event(
-                logger,
-                "warning",
-                "mongodb_recovered_interrupted_processes count=%s stale_after_seconds=%s",
-                len(recovered),
-                stale_after_seconds,
-                domain="mongodb",
-                recovered_count=len(recovered),
-                stale_after_seconds=stale_after_seconds,
-            )
-        return recovered
-
-    def _claim_stale_process_for_recovery(
-        self,
-        process_id: str,
-        status: str,
-        stale_before: datetime,
-        now: datetime,
-    ) -> dict[str, Any] | None:
-        recovery_fields = {
-            "status": "recovering",
-            "updated_at": now,
-            "metadata.recovery_claimed_at": now,
-        }
-        if status != "recovering":
-            recovery_fields["metadata.recovery_previous_status"] = status
-        return self._get_collection("process_uploads").find_one_and_update(
-            {
-                "process_id": process_id,
-                "status": status,
-                "updated_at": {"$lte": stale_before},
-            },
-            {"$set": recovery_fields},
-            projection={"_id": 0},
-            return_document=ReturnDocument.BEFORE,
-        )
-
-    async def find_stale_queued_processes(self, *, queued_after_seconds: int) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._find_stale_queued_processes_sync, queued_after_seconds)
-
-    async def count_active_processes(self) -> int:
-        return await asyncio.to_thread(self._count_active_processes_sync)
-
-    def _count_active_processes_sync(self) -> int:
-        return int(
-            self._get_collection("process_uploads").count_documents(
-                {"status": {"$in": ["acquiring_browser", "recovering", "running", "stop_requested"]}}
-            )
-        )
-
-    def _find_stale_queued_processes_sync(self, queued_after_seconds: int) -> list[dict[str, Any]]:
-        now = datetime.utcnow()
-        queued_after = max(1, int(queued_after_seconds))
-        stale_before = now - timedelta(seconds=queued_after)
-        claimed: list[dict[str, Any]] = []
-        while True:
-            process = self._get_collection("process_uploads").find_one_and_update(
-                {
-                    "status": "queued",
-                    "updated_at": {"$lte": stale_before},
-                    "$or": [
-                        {"metadata.requeue_claimed_at": {"$exists": False}},
-                        {"metadata.requeue_claimed_at": {"$lte": stale_before}},
-                    ],
-                },
-                {
-                    "$set": {
-                        "updated_at": now,
-                        "metadata.requeue_claimed_at": now + timedelta(seconds=queued_after),
-                    }
-                },
-                sort=[("updated_at", ASCENDING)],
-                projection={"_id": 0},
-                return_document=ReturnDocument.AFTER,
-            )
-            if process is None:
-                break
-            claimed.append(process)
-        return [
-            {
-                "process_id": process.get("process_id"),
-                "previous_status": "queued",
-                "recovered_status": "queued",
-                "action": "requeue_stale_queued",
-            }
-            for process in claimed
-            if process.get("process_id")
-        ]
-
-    def _recover_stale_stop_requested_process(self, process: dict[str, Any], now: datetime) -> dict[str, Any]:
-        process_id = process["process_id"]
-        stopped_result = self._get_collection("domain_runs").update_many(
-            {
-                "process_id": process_id,
-                "status": {"$in": ["queued", "acquiring_browser", "recovering", "running", "stop_requested"]},
-            },
-            {
-                "$set": {
-                    "status": "stopped",
-                    "error": "Process stop requested before service interruption recovery.",
-                    "completed_at": now,
-                    "updated_at": now,
-                }
-            },
-        )
-        self._get_collection("process_uploads").update_one(
-            {"process_id": process_id},
-            {
-                "$set": {
-                    "status": "stopped",
-                    "completed_at": now,
-                    "updated_at": now,
-                    "metadata.recovered_after_interruption": True,
-                    "metadata.recovery_action": "stopped_after_stale_stop_request",
-                    "metadata.recovered_at": now,
-                }
-            },
-        )
-        return {
-            "process_id": process_id,
-            "previous_status": process.get("status"),
-            "recovered_status": "stopped",
-            "action": "stopped",
-            "domain_count": stopped_result.modified_count,
-        }
-
-    def _recover_stale_acquiring_browser_process(self, process: dict[str, Any], now: datetime) -> dict[str, Any]:
-        process_id = process["process_id"]
-        self._get_collection("process_uploads").update_one(
-            {"process_id": process_id},
-            {
-                "$set": {
-                    "status": "queued",
-                    "started_at": None,
-                    "completed_at": None,
-                    "updated_at": now,
-                    "metadata.recovered_after_interruption": True,
-                    "metadata.recovery_action": "requeued_after_stale_browser_acquire",
-                    "metadata.recovered_at": now,
-                    "metadata.capacity_state": "waiting_for_browser",
-                },
-                "$unset": {"metadata.claimed_at": "", "metadata.worker_id": ""},
-            },
-        )
-        return {
-            "process_id": process_id,
-            "previous_status": process.get("status"),
-            "recovered_status": "queued",
-            "action": "requeued_browser_acquire",
-            "domain_count": 0,
-        }
-
-    def _recover_stale_running_process(self, process: dict[str, Any], now: datetime) -> dict[str, Any]:
-        process_id = process["process_id"]
-        reset_result = self._get_collection("domain_runs").update_many(
-            {
-                "process_id": process_id,
-                "status": {"$in": ["queued", "acquiring_browser", "recovering", "running", "stop_requested"]},
-            },
-            {
-                "$set": {
-                    "status": "queued",
-                    "error": None,
-                    "agent_index": None,
-                    "started_at": None,
-                    "completed_at": None,
-                    "updated_at": now,
-                }
-            },
-        )
-        self._get_collection("process_uploads").update_one(
-            {"process_id": process_id},
-            {
-                "$set": {
-                    "status": "queued",
-                    "assignments.$[].status": "queued",
-                    "started_at": None,
-                    "completed_at": None,
-                    "updated_at": now,
-                    "metadata.recovered_after_interruption": True,
-                    "metadata.recovery_action": "requeued_after_stale_running",
-                    "metadata.recovered_at": now,
-                }
-            },
-        )
-        return {
-            "process_id": process_id,
-            "previous_status": process.get("status"),
-            "recovered_status": "queued",
-            "action": "requeued",
-            "domain_count": reset_result.modified_count,
-        }
 
     async def reset_process_for_rerun(self, process_id: str) -> dict[str, Any] | None:
         return await asyncio.to_thread(self._reset_process_for_rerun_sync, process_id)
@@ -1025,6 +598,20 @@ class MongoDBService:
                 }
             },
         )
+        job_count = len(updates.get("current_job_keys") or [])
+        new_job_count = len(updates.get("added_job_keys") or [])
+        self._get_collection("process_uploads").update_one(
+            {"process_id": process_id},
+            {
+                "$inc": {
+                    "summary.processed_domain_count": 1,
+                    "summary.completed_domain_count": 1,
+                    "summary.job_count": job_count,
+                    "summary.new_job_count": new_job_count,
+                },
+                "$set": {"updated_at": now},
+            },
+        )
 
     async def mark_domain_failed(
         self,
@@ -1063,6 +650,16 @@ class MongoDBService:
                     "completed_at": now,
                     "updated_at": now,
                 }
+            },
+        )
+        self._get_collection("process_uploads").update_one(
+            {"process_id": process_id},
+            {
+                "$inc": {
+                    "summary.processed_domain_count": 1,
+                    "summary.failed_domain_count": 1,
+                },
+                "$set": {"updated_at": now},
             },
         )
 

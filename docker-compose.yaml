@@ -6,140 +6,21 @@ services:
     env_file:
       - ./source/.env
     environment:
-      PROCESS_EXECUTION_MODE: celery
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/1
-      CELERY_TASK_QUEUE: ${CELERY_TASK_QUEUE:-agent_jobs}
       SELENIUM_REMOTE_URL: http://selenium-hub:4444/wd/hub
       MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
       MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
       MONGODB_CLIENTS_COLLECTION: clients
       MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
       MONGODB_DOMAIN_RUNS_COLLECTION: domain_runs
+    volumes:
+      - ./logs:/app/logs
     ports:
       - "${API_PORT:-8110}:8110"
     depends_on:
       mongo:
         condition: service_started
-      redis:
-        condition: service_started
       selenium-hub:
         condition: service_started
-    restart: unless-stopped
-
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    command:
-      [
-        "celery",
-        "-A",
-        "infrastructure.queue.celery_app:celery_app",
-        "worker",
-        "--loglevel=INFO",
-        "--concurrency=${CELERY_WORKER_CONCURRENCY:-1}",
-        "--queues=${CELERY_TASK_QUEUE:-agent_jobs}",
-        "--hostname=worker@%h",
-      ]
-    env_file:
-      - ./source/.env
-    environment:
-      PROCESS_EXECUTION_MODE: celery
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/1
-      CELERY_TASK_QUEUE: ${CELERY_TASK_QUEUE:-agent_jobs}
-      REDIS_PROCESS_HEARTBEAT_TTL_SECONDS: ${REDIS_PROCESS_HEARTBEAT_TTL_SECONDS:-7200}
-      REDIS_PROCESS_HEARTBEAT_INTERVAL_SECONDS: ${REDIS_PROCESS_HEARTBEAT_INTERVAL_SECONDS:-3600}
-      REDIS_PROCESS_HEARTBEAT_PREFIX: ${REDIS_PROCESS_HEARTBEAT_PREFIX:-heartbeat}
-      WATCHDOG_ENABLED: ${WATCHDOG_ENABLED:-true}
-      WATCHDOG_INTERVAL_SECONDS: ${WATCHDOG_INTERVAL_SECONDS:-1800}
-      WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-3}
-      SELENIUM_REMOTE_URL: http://selenium-hub:4444/wd/hub
-      MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
-      MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
-      MONGODB_CLIENTS_COLLECTION: clients
-      MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
-      MONGODB_DOMAIN_RUNS_COLLECTION: domain_runs
-    depends_on:
-      mongo:
-        condition: service_started
-      redis:
-        condition: service_started
-      selenium-hub:
-        condition: service_started
-      chrome-node:
-        condition: service_started
-    restart: unless-stopped
-
-  celery-beat:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    command:
-      [
-        "celery",
-        "-A",
-        "infrastructure.queue.celery_app:celery_app",
-        "beat",
-        "--loglevel=INFO",
-        "--schedule=/tmp/celerybeat-schedule",
-      ]
-    env_file:
-      - ./source/.env
-    environment:
-      PROCESS_EXECUTION_MODE: celery
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/1
-      CELERY_TASK_QUEUE: ${CELERY_TASK_QUEUE:-agent_jobs}
-      WATCHDOG_ENABLED: ${WATCHDOG_ENABLED:-true}
-      WATCHDOG_INTERVAL_SECONDS: ${WATCHDOG_INTERVAL_SECONDS:-1800}
-      MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
-      MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
-      MONGODB_CLIENTS_COLLECTION: clients
-      MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
-      MONGODB_DOMAIN_RUNS_COLLECTION: domain_runs
-    depends_on:
-      mongo:
-        condition: service_started
-      redis:
-        condition: service_started
-    restart: unless-stopped
-
-  legacy-worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    command: ["python", "-m", "tasks.worker"]
-    profiles:
-      - legacy-worker
-    env_file:
-      - ./source/.env
-    environment:
-      PROCESS_EXECUTION_MODE: worker
-      WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-3}
-      SELENIUM_REMOTE_URL: http://selenium-hub:4444/wd/hub
-      MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
-      MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
-      MONGODB_CLIENTS_COLLECTION: clients
-      MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
-      MONGODB_DOMAIN_RUNS_COLLECTION: domain_runs
-    depends_on:
-      mongo:
-        condition: service_started
-      selenium-hub:
-        condition: service_started
-      chrome-node:
-        condition: service_started
-    restart: unless-stopped
-
-  redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
-    ports:
-      - "6379:6379"
-    volumes:
-      - ./redis-data:/data
     restart: unless-stopped
 
   selenium-hub:
@@ -182,8 +63,6 @@ services:
 
   mongo-express:
     image: mongo-express:latest
-    # profiles:
-    #   - debug
     ports:
       - "8081:8081"
     environment:
@@ -200,4 +79,3 @@ services:
 
 volumes:
   mongo-data:
-  redis-data:

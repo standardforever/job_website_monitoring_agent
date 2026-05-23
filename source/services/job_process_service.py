@@ -8,7 +8,6 @@ from browser.session_manager import BrowserSessionManager
 from core.config import get_settings
 from models.process import JobProcessRequest
 from pipeline.domain_processor import DomainProcessor
-from pipeline.exceptions import BrowserCapacityUnavailable
 from pipeline.process_executor import ProcessExecutor
 from pipeline.process_summary import empty_summary
 from services.client_service import ClientService
@@ -36,6 +35,7 @@ class JobProcessService:
             stop_requested=self._is_stop_requested,
         )
         self._stop_requests: set[str] = set()
+        self._active_processes: set[str] = set()
         log_event(logger, "info", "job_process_service_initialized", domain="service")
 
     async def submit_process(
@@ -82,49 +82,17 @@ class JobProcessService:
         return await self.execute_process(submitted["process_id"])
 
     async def execute_process(self, process_id: str) -> dict[str, Any]:
-        result = await self._executor.execute(process_id)
-        self._stop_requests.discard(process_id)
-        await self._send_process_completion_email(process_id, result["status"])
-        return result
-
-    async def claim_process_for_execution(self, process_id: str, worker_id: str | None = None) -> dict[str, Any] | None:
-        return await self._mongodb_service.begin_process_execution(process_id, worker_id)
+        self._active_processes.add(process_id)
+        try:
+            result = await self._executor.execute(process_id)
+            self._stop_requests.discard(process_id)
+            await self._send_process_completion_email(process_id, result["status"])
+            return result
+        finally:
+            self._active_processes.discard(process_id)
 
     async def skipped_or_invalid_process(self, process_id: str) -> dict[str, Any]:
         return await self._executor.skipped_or_invalid_process(process_id)
-
-    async def acquire_browser_for_process(self, process: dict[str, Any]) -> tuple[dict[str, Any], Any]:
-        process_id = str(process["process_id"])
-        grid_url = str(self._settings.selenium_remote_url or "").strip() or None
-        browser_runtime = await self._browser_manager.create_process_session(grid_url)
-        if browser_runtime is None:
-            retry_delay = self._settings.browser_session_retry_delay_seconds
-            error = "Browser capacity is not available yet"
-            await self._mongodb_service.release_process_for_browser_retry(process_id, error, retry_delay)
-            raise BrowserCapacityUnavailable(error)
-
-        running_process = await self._mongodb_service.mark_process_running(process_id)
-        if running_process is None:
-            await self._browser_manager.close_process_session(browser_runtime)
-            raise BrowserCapacityUnavailable("Process changed state before browser acquisition completed")
-        await self._mongodb_service.update_process_upload(
-            process_id,
-            {
-                "metadata.active_browser_session_id": browser_runtime.session_id,
-                "metadata.active_grid_url": browser_runtime.grid_url or "",
-            },
-        )
-        return running_process, browser_runtime
-
-    async def execute_process_with_browser(self, process: dict[str, Any], browser_runtime: Any) -> dict[str, Any]:
-        result = await self._executor.execute_with_browser(process, browser_runtime)
-        process_id = str(process["process_id"])
-        self._stop_requests.discard(process_id)
-        await self._send_process_completion_email(process_id, result["status"])
-        return result
-
-    async def close_process_browser_session(self, browser_runtime: Any) -> None:
-        await self._browser_manager.close_process_session(browser_runtime)
 
     async def submit_rerun_process(self, process_id: str) -> dict[str, Any]:
         process = await self._mongodb_service.get_process_with_domains(process_id)
@@ -166,27 +134,43 @@ class JobProcessService:
         if status in {"completed", "partial_completed", "failed", "stopped"}:
             return {"process_id": process_id, "status": status, "message": f"Process is already {status}."}
         self._stop_requests.add(process_id)
-        updated = await self._mongodb_service.mark_process_stop_requested(process_id)
+        await self._mongodb_service.mark_process_stop_requested(process_id)
         process_with_domains = await self._mongodb_service.get_process_with_domains(process_id)
-        if status in {"queued", "acquiring_browser", "recovering"} and not (process_with_domains or {}).get("started_at"):
-            items = list((process_with_domains or {}).get("items") or [])
-            await self._mongodb_service.mark_domains_stopped(
-                process_id,
-                [{"domain_key": item.get("domain_key"), "career_page_url": item.get("career_page_url")} for item in items],
-            )
-            summary = empty_summary(len(items), len((process_with_domains or {}).get("assignments") or []))
-            summary["processed_domain_count"] = len(items)
-            summary["stopped_domain_count"] = len(items)
-            await self._mongodb_service.update_process_upload(
-                process_id,
-                {"status": "stopped", "completed_at": datetime.utcnow(), "summary": summary},
-            )
-            return {"process_id": process_id, "status": "stopped", "message": "Queued process stopped before execution."}
+        items = list((process_with_domains or {}).get("items") or [])
+        assignments = list((process_with_domains or {}).get("assignments") or [])
+
+        # Process never started — stop it immediately
+        if status in {"queued", "acquiring_browser"} and not (process_with_domains or {}).get("started_at"):
+            return await self._force_stop(process_id, items, assignments, "Queued process stopped before execution.")
+
+        # No active background task owns this process — it is orphaned (e.g. after an API restart)
+        if process_id not in self._active_processes:
+            return await self._force_stop(process_id, items, assignments, "Process stopped (no active execution found).")
+
         return {
             "process_id": process_id,
-            "status": str((updated or process).get("status") or "stop_requested"),
+            "status": "stop_requested",
             "message": "Stop requested. Running work will stop after the current domain finishes.",
         }
+
+    async def _force_stop(self, process_id: str, items: list, assignments: list, message: str) -> dict[str, Any]:
+        domain_keys = [{"domain_key": item.get("domain_key"), "career_page_url": item.get("career_page_url")} for item in items]
+        await self._mongodb_service.mark_domains_stopped(process_id, domain_keys)
+        unfinished = sum(1 for item in items if str(item.get("status") or "") not in {"completed", "failed", "stopped"})
+        already_processed = sum(1 for item in items if str(item.get("status") or "") in {"completed", "failed"})
+        already_completed = sum(1 for item in items if str(item.get("status") or "") == "completed")
+        already_failed = sum(1 for item in items if str(item.get("status") or "") == "failed")
+        summary = empty_summary(len(items), len(assignments))
+        summary["processed_domain_count"] = already_processed + unfinished
+        summary["completed_domain_count"] = already_completed
+        summary["failed_domain_count"] = already_failed
+        summary["stopped_domain_count"] = unfinished
+        await self._mongodb_service.update_process_upload(
+            process_id,
+            {"status": "stopped", "completed_at": datetime.utcnow(), "summary": summary},
+        )
+        self._stop_requests.discard(process_id)
+        return {"process_id": process_id, "status": "stopped", "message": message}
 
     async def register_client(self, client_name: str, email: str | None, api_key: str, model: str, grid_url: str | None) -> dict[str, Any]:
         return await self._client_service.register(
