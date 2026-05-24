@@ -6,7 +6,8 @@ services:
     env_file:
       - ./source/.env
     environment:
-      SELENIUM_REMOTE_URL: http://selenium-hub:4444/wd/hub
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
       MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
       MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
       MONGODB_CLIENTS_COLLECTION: clients
@@ -17,37 +18,139 @@ services:
     ports:
       - "${API_PORT:-8110}:8110"
     depends_on:
+      redis:
+        condition: service_healthy
       mongo:
         condition: service_started
-      selenium-hub:
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8110/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker_1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - ./source/.env
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
+      MONGODB_CLIENTS_COLLECTION: clients
+      MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
+      MONGODB_DOMAIN_RUNS_COLLECTION: domain_runs
+      SELENIUM_REMOTE_URL: http://selenium_1:4444/wd/hub
+      TASK_MAX_ATTEMPTS: ${TASK_MAX_ATTEMPTS:-3}
+      HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-30}
+    volumes:
+      - ./logs:/app/logs
+    command: celery -A infrastructure.celery_app worker --loglevel=info --concurrency=1 --queues=processes --hostname=worker_1@%h
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_started
+      selenium_1:
+        condition: service_started
+    restart: unless-stopped
+    stop_grace_period: 300s
+
+  worker_2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - ./source/.env
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
+      MONGODB_CLIENTS_COLLECTION: clients
+      MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
+      MONGODB_DOMAIN_RUNS_COLLECTION: domain_runs
+      SELENIUM_REMOTE_URL: http://selenium_2:4444/wd/hub
+      TASK_MAX_ATTEMPTS: ${TASK_MAX_ATTEMPTS:-3}
+      HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-30}
+    volumes:
+      - ./logs:/app/logs
+    command: celery -A infrastructure.celery_app worker --loglevel=info --concurrency=1 --queues=processes --hostname=worker_2@%h
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_started
+      selenium_2:
+        condition: service_started
+    restart: unless-stopped
+    stop_grace_period: 300s
+
+  watchdog:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - ./source/.env
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
+      MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
+      STALE_TASK_SECONDS: ${STALE_TASK_SECONDS:-300}
+      WATCHDOG_INTERVAL_SECONDS: ${WATCHDOG_INTERVAL_SECONDS:-60}
+      TASK_MAX_ATTEMPTS: ${TASK_MAX_ATTEMPTS:-3}
+    command: python -m infrastructure.watchdog
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongo:
         condition: service_started
     restart: unless-stopped
 
-  selenium-hub:
-    image: selenium/hub:latest
-    ports:
-      - "${SELENIUM_HUB_PORT:-4445}:4444"
-    environment:
-      SE_SESSION_REQUEST_TIMEOUT: ${SE_SESSION_REQUEST_TIMEOUT:-600}
-      SE_SESSION_RETRY_INTERVAL: ${SE_SESSION_RETRY_INTERVAL:-5}
-    restart: unless-stopped
-
-  chrome-node:
-    image: selenium/node-chromium:latest
+  selenium_1:
+    image: selenium/standalone-chromium:latest
     shm_size: "${CHROME_SHM_SIZE:-2g}"
     environment:
-      SE_EVENT_BUS_HOST: selenium-hub
-      SE_EVENT_BUS_PUBLISH_PORT: 4442
-      SE_EVENT_BUS_SUBSCRIBE_PORT: 4443
-      SE_NODE_MAX_SESSIONS: ${SE_NODE_MAX_SESSIONS:-1}
+      SE_NODE_MAX_SESSIONS: 1
       SE_NODE_OVERRIDE_MAX_SESSIONS: "true"
       SE_NODE_SESSION_TIMEOUT: ${SE_NODE_SESSION_TIMEOUT:-900}
       SE_BROWSER_ARGS_DISABLE_DSHM: --disable-dev-shm-usage
       SE_BROWSER_ARGS_NO_SANDBOX: --no-sandbox
-    depends_on:
-      selenium-hub:
-        condition: service_started
+    ports:
+      - "4441:4444"
     restart: unless-stopped
+
+  selenium_2:
+    image: selenium/standalone-chromium:latest
+    shm_size: "${CHROME_SHM_SIZE:-2g}"
+    environment:
+      SE_NODE_MAX_SESSIONS: 1
+      SE_NODE_OVERRIDE_MAX_SESSIONS: "true"
+      SE_NODE_SESSION_TIMEOUT: ${SE_NODE_SESSION_TIMEOUT:-900}
+      SE_BROWSER_ARGS_DISABLE_DSHM: --disable-dev-shm-usage
+      SE_BROWSER_ARGS_NO_SANDBOX: --no-sandbox
+    ports:
+      - "4442:4444"
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   mongo:
     image: mongo:7
@@ -57,7 +160,7 @@ services:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-admin}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-secret}
     volumes:
-      - ./mongo-data:/data/db
+      - mongo-data:/data/db
       - ./mongod.conf:/etc/mongod.conf:ro
     restart: unless-stopped
 
@@ -79,3 +182,4 @@ services:
 
 volumes:
   mongo-data:
+  redis-data:

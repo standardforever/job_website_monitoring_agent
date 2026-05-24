@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -14,6 +14,7 @@ from services.client_service import ClientService
 from services.email_service import EmailService
 from services.file_input_service import UploadDomainInput
 from services.flow_safety import extract_domain
+from services.grid_session import close_session_via_http_async
 from services.mongodb_service import MongoDBService
 from utils.logging import configure_logging, get_logger, log_event
 
@@ -139,19 +140,39 @@ class JobProcessService:
         items = list((process_with_domains or {}).get("items") or [])
         assignments = list((process_with_domains or {}).get("assignments") or [])
 
+        # Close the browser session immediately so any in-progress domain fails fast
+        await self._close_process_browser(process_with_domains)
+
         # Process never started — stop it immediately
         if status in {"queued", "acquiring_browser"} and not (process_with_domains or {}).get("started_at"):
             return await self._force_stop(process_id, items, assignments, "Queued process stopped before execution.")
 
-        # No active background task owns this process — it is orphaned (e.g. after an API restart)
+        # No active background task owns this process — check heartbeat before force-stopping
         if process_id not in self._active_processes:
-            return await self._force_stop(process_id, items, assignments, "Process stopped (no active execution found).")
+            heartbeat_at = ((process_with_domains or {}).get("metadata") or {}).get("heartbeat_at")
+            heartbeat_is_fresh = (
+                heartbeat_at is not None
+                and (datetime.now(timezone.utc) - heartbeat_at.replace(tzinfo=timezone.utc)).total_seconds()
+                < timedelta(seconds=300).total_seconds()
+            )
+            if not heartbeat_is_fresh:
+                return await self._force_stop(process_id, items, assignments, "Process stopped (no active execution found).")
 
         return {
             "process_id": process_id,
             "status": "stop_requested",
             "message": "Stop requested. Running work will stop after the current domain finishes.",
         }
+
+    async def _close_process_browser(self, process: dict[str, Any] | None) -> None:
+        metadata = (process or {}).get("metadata") or {}
+        session_id = metadata.get("browser_session_id")
+        grid_url = metadata.get("browser_grid_url")
+        if session_id and grid_url:
+            try:
+                await close_session_via_http_async(grid_url, session_id)
+            except Exception:
+                pass
 
     async def _force_stop(self, process_id: str, items: list, assignments: list, message: str) -> dict[str, Any]:
         domain_keys = [{"domain_key": item.get("domain_key"), "career_page_url": item.get("career_page_url")} for item in items]

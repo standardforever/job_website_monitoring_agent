@@ -303,50 +303,77 @@ async def is_grid_session_active_async(grid_url: str | None, session_id: str | N
     return await asyncio.to_thread(is_grid_session_active, grid_url, session_id)
 
 
-async def attach_playwright_to_cdp(cdp_url: str) -> BrowserSession | None:
+async def attach_playwright_to_cdp(cdp_url: str, *, retries: int = 4) -> BrowserSession | None:
     if async_playwright is None:
         log_event(logger, "error", "playwright_not_installed", domain="browser")
         return None
 
-    try:
-        playwright = await async_playwright().start()
-        browser = await playwright.chromium.connect_over_cdp(cdp_url, timeout=30_000)
-        contexts = browser.contexts
-        if contexts:
-            context = contexts[0]
-        else:
-            context = await browser.new_context()
-        context.set_default_navigation_timeout(60_000)
-        context.set_default_timeout(60_000)
-        page = await context.new_page()
-        await page.bring_to_front()
-        log_event(
-            logger,
-            "info",
-            "playwright_attached_to_cdp session_id=%s",
-            cdp_url.rstrip("/").split("/")[-3],
-            domain=cdp_url,
-            session_id=cdp_url.rstrip("/").split("/")[-3],
-        )
-        return BrowserSession(
-            session_id=cdp_url.rstrip("/").split("/")[-3],
-            cdp_url=cdp_url,
-            playwright=playwright,
-            browser=browser,
-            context=context,
-            page=page,
-        )
-    except Exception as exc:
-        log_event(
-            logger,
-            "error",
-            "playwright_attach_failed error=%s",
-            str(exc),
-            domain=cdp_url,
-            cdp_url=cdp_url,
-            error=str(exc),
-        )
-        return None
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        playwright = None
+        try:
+            playwright = await async_playwright().start()
+            browser = await playwright.chromium.connect_over_cdp(cdp_url, timeout=30_000)
+            contexts = browser.contexts
+            if contexts:
+                context = contexts[0]
+            else:
+                context = await browser.new_context()
+            context.set_default_navigation_timeout(60_000)
+            context.set_default_timeout(60_000)
+            page = await context.new_page()
+            await page.bring_to_front()
+            log_event(
+                logger,
+                "info",
+                "playwright_attached_to_cdp session_id=%s attempt=%s",
+                cdp_url.rstrip("/").split("/")[-3],
+                attempt + 1,
+                domain=cdp_url,
+                session_id=cdp_url.rstrip("/").split("/")[-3],
+            )
+            return BrowserSession(
+                session_id=cdp_url.rstrip("/").split("/")[-3],
+                cdp_url=cdp_url,
+                playwright=playwright,
+                browser=browser,
+                context=context,
+                page=page,
+            )
+        except Exception as exc:
+            last_exc = exc
+            try:
+                if playwright is not None:
+                    await playwright.stop()
+            except Exception:
+                pass
+            if attempt < retries - 1:
+                backoff = 2.0 ** attempt  # 1s, 2s, 4s
+                log_event(
+                    logger,
+                    "warning",
+                    "playwright_attach_retry attempt=%s backoff=%.1fs error=%s",
+                    attempt + 1,
+                    backoff,
+                    str(exc),
+                    domain=cdp_url,
+                    cdp_url=cdp_url,
+                    attempt=attempt + 1,
+                    error=str(exc),
+                )
+                await asyncio.sleep(backoff)
+
+    log_event(
+        logger,
+        "error",
+        "playwright_attach_failed_all_retries retries=%s error=%s",
+        retries,
+        str(last_exc),
+        domain=cdp_url,
+        cdp_url=cdp_url,
+        error=str(last_exc),
+    )
+    return None
 
 
 async def close_browser_attachment(session: BrowserSession | None) -> None:

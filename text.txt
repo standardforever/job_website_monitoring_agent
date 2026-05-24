@@ -1,2 +1,324 @@
-docker compose --profile debug --profile monitor down --remove-orphans
-docker compose --profile debug --profile monitor up  --scale worker=4 --scale chrome-node=4
+You are a senior backend/infrastructure engineer. Build an MVP production-ready long-running browser task system using FastAPI, MongoDB, Redis, Celery, Docker Compose, and Selenium Grid.
+
+Context:
+The application currently accepts user uploads of domain URLs through FastAPI. The business logic already exists and must not be rewritten. Celery should only call the existing entrypoint:
+
+from __future__ import annotations
+
+from typing import Any
+
+from services.job_process_service import JobProcessService
+from utils.logging import get_logger, log_event
+
+logger = get_logger("process_tasks")
+process_task_service = JobProcessService()
+
+
+async def execute_process_task(process_id: str) -> dict[str, Any]:
+    log_event(
+        logger,
+        "info",
+        "execute_process_task_started process_id=%s",
+        process_id,
+        domain=process_id,
+        process_id=process_id,
+    )
+    result = await process_task_service.execute_process(process_id)
+    log_event(
+        logger,
+        "info",
+        "execute_process_task_completed process_id=%s status=%s",
+        process_id,
+        result.get("status"),
+        domain=process_id,
+        process_id=process_id,
+        status=result.get("status"),
+    )
+    return result
+
+Do not modify the business logic inside JobProcessService or execute_process_task. Wrap it safely with Celery, Redis, MongoDB task status tracking, heartbeat, retry, and Docker infrastructure.
+
+Goal:
+Replace FastAPI BackgroundTasks with Celery workers so FastAPI only creates/queues jobs and immediately returns process_id to the client.
+
+Target MVP architecture:
+
+FastAPI
+  → MongoDB stores process/task status
+  → Redis acts as Celery broker/result backend
+  → Celery workers execute process jobs
+  → each worker uses its own dedicated Selenium Grid URL
+  → each Selenium hub/node exposes its port to the host machine
+  → watchdog service detects stale/frozen tasks and requeues or fails them
+
+Main requirements:
+
+1. FastAPI entrypoint
+- FastAPI receives upload request.
+- Save process document in MongoDB with status = "queued".
+- Send process_id to Celery.
+- Return response immediately.
+- Do not run long jobs inside FastAPI BackgroundTasks.
+
+MongoDB process document should include:
+
+{
+  "_id": process_id,
+  "status": "queued | running | completed | failed | retrying", # or anyother one currently used in the business logic
+  "attempt_count": 0,
+  "max_attempts": 3,
+  "created_at": datetime,
+  "started_at": null,
+  "finished_at": null,
+  "heartbeat_at": null,
+  "worker_id": null,
+  "celery_task_id": null,
+  "error_message": null,
+  "locked_until": null,
+  "result": null
+}
+
+2. Celery task wrapper
+Create a Celery task that calls the existing async execute_process_task(process_id).
+
+Because execute_process_task is async, the Celery sync task should run it with asyncio.run() or a safe event loop helper.
+
+Celery task must:
+- mark MongoDB status as "running" before executing
+- set started_at
+- set heartbeat_at
+- set worker_id
+- increment attempt_count safely
+- call execute_process_task(process_id)
+- mark completed on success
+- mark failed or retrying on failure
+- always clean up status and logs correctly
+
+3. Celery safe settings
+Configure Celery for long-running browser jobs:
+
+task_acks_late = True
+task_reject_on_worker_lost = True
+worker_prefetch_multiplier = 1
+task_track_started = True
+task_time_limit = 24 hours
+task_soft_time_limit = slightly less than 24 hours
+broker_transport_options visibility_timeout = 24 hours
+result_expires = 24 hours
+
+Redis should expire Celery result/task metadata after 24 hours for MVP.
+
+Use settings similar to:
+
+broker_url = redis://redis:6379/0
+result_backend = redis://redis:6379/1
+result_expires = 86400
+broker_transport_options = {
+  "visibility_timeout": 86400
+}
+
+Important:
+- Do not set timeouts too low and accidentally kill valid long-running browser jobs.
+- For MVP, use 24 hours max.
+- Browser-level timeouts should still exist for page load freezes.
+
+
+
+4. Heartbeat design
+Implement heartbeat using MongoDB.
+
+The Celery task should start a lightweight heartbeat thread while execute_process_task is running.
+
+Heartbeat behavior:
+- when task starts, set heartbeat_at = now
+- every 30 seconds, update heartbeat_at = now
+- heartbeat stops when task completes/fails
+- watchdog checks for running/retrying tasks where heartbeat_at is older than STALE_TASK_SECONDS
+- for MVP use:
+  HEARTBEAT_INTERVAL_SECONDS=30
+  STALE_TASK_SECONDS=300
+
+If heartbeat is stale:
+- if attempt_count < max_attempts:
+  set status = "queued"
+  clear worker_id
+  clear celery_task_id
+  set error_message = "stale heartbeat detected; requeued"
+  enqueue task again
+- else:
+  set status = "failed"
+  set error_message = "stale heartbeat detected; max attempts reached"
+
+6. Watchdog service
+Create a separate Docker service called watchdog.
+
+It should:
+- run forever
+- every 60 seconds scan MongoDB for stale running tasks
+- requeue or fail tasks
+- log every action
+- not depend on FastAPI being alive
+
+Watchdog should handle:
+- browser freeze
+- Celery worker freeze
+- server reboot
+- container crash
+- Redis lost queue message
+- task stuck forever in running state
+
+7. Docker Compose infrastructure
+Create docker-compose.yml with:
+
+services:
+- api
+- redis
+- mongodb
+- worker_1
+- worker_2
+- selenium_hub_1 / selenium_chrome_1 or standalone_chrome_1
+- selenium_hub_2 / selenium_chrome_2 or standalone_chrome_2
+- watchdog
+- flower optional
+
+Each worker should have its own dedicated Selenium Grid URL:
+
+worker_1:
+  SELENIUM_GRID_URL=http://selenium_1:4444/wd/hub
+
+worker_2:
+  SELENIUM_GRID_URL=http://selenium_2:4444/wd/hub
+
+Each Selenium service should expose a host port:
+
+selenium_1:
+  ports:
+    - "4441:4444"
+
+selenium_2:
+  ports:
+    - "4442:4444"
+
+Use shm_size: "2gb" for Selenium Chrome containers.
+
+Use restart: unless-stopped for api, workers, redis, mongodb, selenium, and watchdog.
+
+8. Configurable number of workers
+Docker Compose cannot dynamically create different named services purely from an environment variable in a simple way.
+
+For MVP, support two options:
+
+Option A:
+Use docker compose scaling:
+
+docker compose up --scale worker=3
+
+But note:
+- all scaled worker replicas will share the same environment
+- this is good if they all connect to one shared Selenium Grid
+- not good if each worker needs a unique dedicated Selenium URL
+
+Option B:
+Generate docker-compose.override.yml from a small script.
+
+Create a script like:
+
+python scripts/generate_compose_workers.py --workers 3
+
+It should generate:
+- worker_1, worker_2, worker_3
+- selenium_1, selenium_2, selenium_3
+- unique SELENIUM_GRID_URL per worker
+- unique host ports: 4441, 4442, 4443
+
+For this MVP, implement Option B because each worker needs its own Selenium hub/container.
+
+9. Worker concurrency
+For MVP:
+- each worker container should run Celery with concurrency=1
+- each worker owns one Selenium grid URL
+- this avoids accidentally creating too many browsers
+
+Command:
+
+celery -A app.celery_app worker --loglevel=INFO --concurrency=1 --hostname=worker_1@%h
+
+Later, concurrency can be increased if each Selenium node supports multiple sessions.
+
+10. Failure handling rules
+Success:
+- status = completed
+- finished_at = now
+- result saved
+
+Normal exception:
+- if attempts left: status = retrying or queued and Celery retry
+- if no attempts left: status = failed
+
+Worker crash:
+- Celery late ack + reject_on_worker_lost should allow requeue
+- watchdog is backup if task stays running in MongoDB
+
+Browser freeze:
+- Selenium timeouts should fail the browser operation
+- Celery soft/hard time limit prevents infinite task runtime
+- heartbeat/watchdog detects stuck jobs
+
+Server reboot:
+- Docker restarts containers
+- watchdog scans MongoDB
+- stale running tasks are requeued or failed
+- Redis uses appendonly persistence for MVP
+
+11. Redis persistence
+Configure Redis with appendonly yes:
+
+redis-server --appendonly yes
+
+Mount Redis volume:
+
+redis_data:/data
+
+12. MongoDB
+Use MongoDB as the primary state store.
+Do not use Celery result backend as source of truth.
+Celery result backend is temporary and expires after 24 hours.
+
+13. Deliverables
+Create or update these files:
+
+- docker-compose.yml
+- scripts/generate_compose_workers.py
+- app/celery_app.py
+- app/tasks/process_tasks.py
+- app/services/process_state_repository.py
+- app/services/heartbeat.py
+- app/watchdog.py
+- app/api/routes/processes.py or equivalent FastAPI route
+- .env.example
+- README.md with run instructions
+
+14. README should explain:
+- how to start MVP
+- how to generate N workers
+- how to submit a process
+- how to check status
+- how heartbeat works
+- how stale task recovery works
+- how to view Flower
+- how Redis 24-hour expiration works
+- why FastAPI BackgroundTasks are not used
+
+15. Important implementation rule
+Do not rewrite the existing business logic.
+Celery should only call:
+
+execute_process_task(process_id)
+
+Everything else should be infrastructure wrapper code around it.
+
+
+NOTE: also put this below into consideration
+
+1. Make the infrastructure and code base simple and less code, easy to understand
+2. handle Job cancellation, Zombie browser cleanup, Graceful shutdown(When Docker stops a worker, Celery should have time to finish or release task), Docker healthchecks

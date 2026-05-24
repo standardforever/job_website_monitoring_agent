@@ -87,6 +87,11 @@ class AgentWorker:
         runtime: SharedSessionRuntime,
     ) -> dict[str, Any]:
         for attempt in range(3):
+            # Check stop before every attempt — including retries after a browser failure.
+            # This prevents _refresh_runtime_if_needed from silently opening a new session
+            # after the browser was deliberately closed by a stop request.
+            if await self._stop_requested_now(process_id):
+                return await self._mark_domain_stopped(process_id, domain)
             browser_session = None
             try:
                 browser_session, agent_tab = await asyncio.wait_for(
@@ -114,6 +119,17 @@ class AgentWorker:
             finally:
                 await close_browser_attachment(browser_session)
         return await self._mark_recovery_failed(process_id, domain, "Agent recovery failed")
+
+    async def _mark_domain_stopped(self, process_id: str, domain: dict[str, Any]) -> dict[str, Any]:
+        await self._mongodb_service.mark_domains_stopped(
+            process_id,
+            [{"domain_key": domain.get("domain_key"), "career_page_url": domain.get("career_page_url")}],
+        )
+        return DomainProcessRecord(
+            domain=domain["domain"],
+            main_domain=extract_domain(domain["domain"]),
+            status="stopped",
+        ).model_dump(mode="json")
 
     async def _process_domain_with_timeout(
         self,

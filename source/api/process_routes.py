@@ -6,7 +6,7 @@ import json
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, Header, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, Header, HTTPException, UploadFile  # noqa: F401
 from fastapi.responses import StreamingResponse
 
 from core.config import get_settings
@@ -18,7 +18,8 @@ from services.email_service import (
     build_process_roles_csv_rows,
 )
 from services.file_input_service import FileInputService
-from tasks.process_tasks import execute_process_task, process_task_service
+from infrastructure.process_tasks import run_process_task
+from tasks.process_tasks import process_task_service
 from utils.logging import get_logger, log_event
 
 router = APIRouter()
@@ -77,8 +78,8 @@ def _validate_admin_password(x_registration_password: str | None) -> None:
         raise HTTPException(status_code=401, detail="Invalid registration password")
 
 
-def _maybe_run_in_background(background_tasks: BackgroundTasks, process_id: str) -> None:
-    background_tasks.add_task(execute_process_task, process_id)
+def _maybe_run_in_background(_background_tasks: BackgroundTasks, process_id: str) -> None:
+    run_process_task.delay(process_id)
 
 
 @router.get("/health")

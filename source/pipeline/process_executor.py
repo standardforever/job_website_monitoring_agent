@@ -50,6 +50,13 @@ class ProcessExecutor:
             if browser_runtime is None:
                 error = "Browser capacity is not available"
                 return await self._fail_startup(process_id, process, error)
+            await self._mongodb_service.update_process_upload(
+                process_id,
+                {
+                    "metadata.browser_session_id": browser_runtime.session_id,
+                    "metadata.browser_grid_url": browser_runtime.grid_url,
+                },
+            )
             running_process = await self._mongodb_service.mark_process_running(process_id)
             if running_process is None:
                 error = "Process changed state before browser acquisition completed"
@@ -168,8 +175,11 @@ class ProcessExecutor:
         )
 
     def _client_grid_url(self, client: dict[str, Any] | None) -> str | None:
+        # Worker's SELENIUM_REMOTE_URL takes priority so each Celery worker uses its own
+        # dedicated selenium. Client's grid_url is only a fallback when no env is set.
+        env_url = str(get_settings().selenium_remote_url or "").strip()
         client_url = str((client or {}).get("grid_url") or "").strip()
-        return client_url or str(get_settings().selenium_remote_url or "").strip() or None
+        return env_url or client_url or None
 
     def _domains_and_assignments(self, process: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         domains = list(process.get("domains") or [])
