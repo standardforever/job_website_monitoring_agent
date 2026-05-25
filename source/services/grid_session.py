@@ -303,6 +303,83 @@ async def is_grid_session_active_async(grid_url: str | None, session_id: str | N
     return await asyncio.to_thread(is_grid_session_active, grid_url, session_id)
 
 
+async def create_agent_tabs_on_cdp(cdp_url: str, count: int) -> list[BrowserSession] | None:
+    """Connect to CDP once and create `count` pages — one per agent, all sharing the same browser."""
+    if async_playwright is None:
+        log_event(logger, "error", "playwright_not_installed", domain="browser")
+        return None
+    playwright = None
+    try:
+        playwright = await async_playwright().start()
+        browser = await playwright.chromium.connect_over_cdp(cdp_url, timeout=30_000)
+        contexts = browser.contexts
+        context = contexts[0] if contexts else await browser.new_context()
+        context.set_default_navigation_timeout(60_000)
+        context.set_default_timeout(60_000)
+        session_id = cdp_url.rstrip("/").split("/")[-3]
+        sessions = []
+        for _ in range(count):
+            page = await context.new_page()
+            sessions.append(BrowserSession(
+                session_id=session_id,
+                cdp_url=cdp_url,
+                playwright=playwright,
+                browser=browser,
+                context=context,
+                page=page,
+            ))
+        log_event(logger, "info", "agent_tabs_created count=%s session_id=%s", count, session_id,
+                  domain=cdp_url, count=count, session_id=session_id)
+        return sessions
+    except Exception as exc:
+        log_event(logger, "error", "agent_tabs_create_failed count=%s error=%s", count, str(exc),
+                  domain=cdp_url, count=count, error=str(exc))
+        if playwright is not None:
+            try:
+                await playwright.stop()
+            except Exception:
+                pass
+        return None
+
+
+async def close_agent_tabs(sessions: list[BrowserSession | None]) -> None:
+    """Close all agent pages then stop the shared playwright instance."""
+    playwright_instance = None
+    for session in (sessions or []):
+        if session is None:
+            continue
+        playwright_instance = session.playwright
+        try:
+            if not session.page.is_closed():
+                await session.page.close()
+        except Exception:
+            pass
+    if playwright_instance is not None:
+        try:
+            await playwright_instance.stop()
+        except Exception:
+            pass
+
+
+async def recreate_tab_in_session(session: BrowserSession) -> BrowserSession | None:
+    """Create a fresh replacement page in the same browser context."""
+    try:
+        page = await session.context.new_page()
+        await page.bring_to_front()
+        return BrowserSession(
+            session_id=session.session_id,
+            cdp_url=session.cdp_url,
+            playwright=session.playwright,
+            browser=session.browser,
+            context=session.context,
+            page=page,
+        )
+    except Exception as exc:
+        log_event(logger, "warning", "tab_recreate_failed error=%s", str(exc),
+                  domain=session.cdp_url, error=str(exc))
+        return None
+
+
 async def attach_playwright_to_cdp(cdp_url: str) -> BrowserSession | None:
     if async_playwright is None:
         log_event(logger, "error", "playwright_not_installed", domain="browser")

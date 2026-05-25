@@ -317,7 +317,7 @@ async def page_extraction() -> str:
         }
 
         // Walk entire body — no visibility gating at the top level either
-        document.body.childNodes.forEach(child => walk(child));
+        (document.body || document.documentElement)?.childNodes.forEach(child => walk(child));
 
         // ═══════════════════════════════════════════════
         // REGISTER interactive elements into selectorMap

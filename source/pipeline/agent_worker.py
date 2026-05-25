@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Callable
 
-from browser.session_manager import AgentSessionRecoveryNeeded, BrowserSessionManager, SharedSessionRuntime
+from browser.session_manager import AgentSessionRecoveryNeeded, BrowserSessionManager, is_recoverable_agent_session_error
 from core.config import get_settings
 from models.process import DomainProcessRecord, WorkerProcessResult
 from pipeline.domain_processor import DomainProcessor
 from pipeline.process_summary import derive_completion_status
 from services.flow_safety import extract_domain
-from services.grid_session import close_browser_attachment
+from services.grid_session import BrowserSession
 from services.mongodb_service import MongoDBService
 
 
@@ -31,7 +31,7 @@ class AgentWorker:
         assigned_domains = list(graph_input.get("assigned_domains") or [])
         process_id = str(graph_input["process_id"])
         agent_index = int(graph_input["agent_index"])
-        runtime: SharedSessionRuntime = graph_input["shared_runtime"]
+        agent_session: BrowserSession = graph_input["agent_session"]
 
         if assigned_domains:
             await self._mongodb_service.update_assignment_status(process_id, agent_index, "running")
@@ -43,7 +43,7 @@ class AgentWorker:
             process_id=process_id,
             agent_index=agent_index,
             assigned_domains=assigned_domains,
-            runtime=runtime,
+            agent_session=agent_session,
         )
         stop_requested = await self._stop_requested_now(process_id)
         await self._finish_agent(process_id, agent_index, assigned_domains)
@@ -55,12 +55,14 @@ class AgentWorker:
         process_id: str,
         agent_index: int,
         assigned_domains: list[dict[str, Any]],
-        runtime: SharedSessionRuntime,
+        agent_session: BrowserSession,
     ) -> tuple[list[dict[str, Any]], list[str], list[str]]:
         domain_results: list[dict[str, Any]] = []
         errors: list[str] = []
         processed: list[str] = []
         processed_keys: set[tuple[Any, Any, Any]] = set()
+
+        current_session = agent_session
         for domain in assigned_domains:
             if await self._stop_requested_now(process_id):
                 await self._stop_remaining(
@@ -68,79 +70,82 @@ class AgentWorker:
                     [pending for pending in assigned_domains if self._domain_run_key(pending) not in processed_keys],
                 )
                 break
-            record = await self._process_with_recovery(process_id, domain, agent_index, runtime)
+            current_session, record = await self._process_one_domain(
+                process_id, domain, agent_index, current_session
+            )
             domain_results.append(record)
             processed.append(domain["domain_key"])
             processed_keys.add(self._domain_run_key(domain))
             if record["status"] != "completed" and record.get("error"):
                 errors.append(str(record["error"]))
+
         return domain_results, errors, processed
 
     def _domain_run_key(self, domain: dict[str, Any]) -> tuple[Any, Any, Any]:
         return domain.get("input_index"), domain.get("domain_key"), domain.get("career_page_url")
 
-    async def _process_with_recovery(
+    async def _process_one_domain(
         self,
         process_id: str,
         domain: dict[str, Any],
         agent_index: int,
-        runtime: SharedSessionRuntime,
-    ) -> dict[str, Any]:
+        session: BrowserSession,
+    ) -> tuple[BrowserSession, dict[str, Any]]:
+        """Process a single domain using the given session tab.
+
+        Returns the (possibly recreated) session so the caller can pass it to the next domain.
+        On unrecoverable failure the original session is returned unchanged.
+        """
         for attempt in range(3):
-            browser_session = None
             try:
-                browser_session, agent_tab = await asyncio.wait_for(
-                    self._browser_manager.open_agent_tab(
-                        runtime=runtime,
-                        agent_index=agent_index,
-                        url=domain["domain"],
-                    ),
-                    timeout=60,
-                )
                 record = await self._process_domain_with_timeout(
-                    process_id,
-                    domain,
-                    browser_session,
-                    agent_index,
-                    agent_tab,
+                    process_id, domain, session, agent_index
                 )
-                return record
-            except AgentSessionRecoveryNeeded as exc:
+                return session, record
+            except (AgentSessionRecoveryNeeded, Exception) as exc:
+                error_text = str(exc) or type(exc).__name__
+                is_recoverable = is_recoverable_agent_session_error(error_text)
+
+                if await self._stop_requested_now(process_id):
+                    return session, await self._mark_recovery_failed(process_id, domain, error_text)
+
+                if is_recoverable and attempt < 2:
+                    replacement = await self._browser_manager.recreate_agent_tab(session)
+                    if replacement is not None:
+                        session = replacement
+                    continue
+
                 if attempt == 2:
-                    return await self._mark_recovery_failed(process_id, domain, str(exc))
-            except Exception as exc:
-                if attempt == 2:
-                    return await self._mark_recovery_failed(process_id, domain, str(exc))
-            finally:
-                await close_browser_attachment(browser_session)
-        return await self._mark_recovery_failed(process_id, domain, "Agent recovery failed")
+                    return session, await self._mark_recovery_failed(process_id, domain, error_text)
+
+        return session, await self._mark_recovery_failed(process_id, domain, "Agent tab recovery failed")
 
     async def _process_domain_with_timeout(
         self,
         process_id: str,
         domain: dict[str, Any],
-        browser_session: Any,
+        session: BrowserSession,
         agent_index: int,
-        agent_tab: dict[str, Any],
     ) -> dict[str, Any]:
         timeout_seconds = max(60, int(get_settings().domain_process_timeout_seconds))
         return await asyncio.wait_for(
             self._domain_processor.process(
                 process_id=process_id,
                 domain=domain,
-                browser_session=browser_session,
+                browser_session=session,
                 agent_index=agent_index,
-                agent_tab=agent_tab,
+                agent_tab={},
             ),
             timeout=timeout_seconds,
         )
 
     async def _mark_recovery_failed(self, process_id: str, domain: dict[str, Any], error_text: str) -> dict[str, Any]:
+        message = str(error_text).strip() or "Unknown error"
         record = DomainProcessRecord(
             domain=domain["domain"],
             main_domain=extract_domain(domain["domain"]),
             status="failed",
-            error=error_text,
+            error=message,
         ).model_dump(mode="json")
         await self._mongodb_service.mark_domain_failed(
             process_id,

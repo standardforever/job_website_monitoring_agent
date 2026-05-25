@@ -6,13 +6,13 @@ from typing import Any
 
 from core.config import get_settings
 from services.grid_session import (
-    attach_playwright_to_cdp,
-    close_browser_attachment,
+    BrowserSession,
+    close_agent_tabs,
     close_shared_session_async,
+    create_agent_tabs_on_cdp,
     create_session_async,
-    is_grid_session_active_async,
+    recreate_tab_in_session,
 )
-from services.tab_manager import ensure_agent_tab
 from utils.logging import get_logger, log_event
 
 logger = get_logger("browser_session_manager")
@@ -84,41 +84,41 @@ class BrowserSessionManager:
         )
         await close_shared_session_async(runtime.session_id)
 
-    async def open_agent_tab(
+    async def create_all_agent_tabs(
         self,
-        *,
         runtime: SharedSessionRuntime,
-        agent_index: int,
-        url: str,
-    ) -> tuple[Any, dict[str, Any]]:
-        async with runtime.recovery_lock:
-            await self._refresh_runtime_if_needed(runtime)
-            session = await attach_playwright_to_cdp(runtime.cdp_url)
-            if session is None:
-                raise RuntimeError("Failed to attach Playwright for domain tab")
-            tab = await ensure_agent_tab(session, agent_index=agent_index)
+        agent_count: int,
+    ) -> list[BrowserSession] | None:
+        sessions = await create_agent_tabs_on_cdp(runtime.cdp_url, agent_count)
+        if sessions is None:
             log_event(
                 logger,
-                "info",
-                "agent_tab_opened agent_index=%s session_id=%s url=%s",
-                agent_index,
+                "error",
+                "agent_tabs_create_failed session_id=%s agent_count=%s",
                 runtime.session_id,
-                url,
-                domain=url,
-                agent_index=agent_index,
+                agent_count,
+                domain=runtime.grid_url or "grid",
                 session_id=runtime.session_id,
+                agent_count=agent_count,
             )
-            return session, tab
+        return sessions
 
-    async def _refresh_runtime_if_needed(self, runtime: SharedSessionRuntime) -> None:
-        if await is_grid_session_active_async(runtime.grid_url, runtime.session_id):
-            return
-        replacement = await create_session_async(grid_url=runtime.grid_url, reuse_existing=False)
-        if replacement is None or not replacement.cdp_url:
-            raise RuntimeError("Shared browser session is unavailable and could not be recreated")
-        await close_shared_session_async(runtime.session_id)
-        runtime.session_id = replacement.session_id
-        runtime.cdp_url = replacement.cdp_url
+    async def close_all_agent_tabs(self, sessions: list[BrowserSession | None] | None) -> None:
+        if sessions:
+            await close_agent_tabs(sessions)
+
+    async def recreate_agent_tab(self, session: BrowserSession) -> BrowserSession | None:
+        replacement = await recreate_tab_in_session(session)
+        if replacement is None:
+            log_event(
+                logger,
+                "warning",
+                "agent_tab_recreate_failed session_id=%s",
+                session.session_id,
+                domain=session.cdp_url,
+                session_id=session.session_id,
+            )
+        return replacement
 
 
 def is_recoverable_agent_session_error(error_text: str) -> bool:
