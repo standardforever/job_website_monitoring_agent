@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import socket
 from datetime import datetime
 
@@ -18,6 +19,7 @@ HEARTBEAT_INTERVAL: int = int(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "30"))
 _MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://admin:secret@127.0.0.1:27017")
 _MONGODB_DB = os.getenv("MONGODB_DATABASE", "job_monitoring_agent")
 _COLLECTION = os.getenv("MONGODB_PROCESS_UPLOADS_COLLECTION", "process_uploads")
+_DOMAIN_COLLECTION = os.getenv("MONGODB_DOMAIN_RUNS_COLLECTION", "domain_runs")
 
 
 def _mongo_col():
@@ -65,8 +67,10 @@ def run_process_task(self: Task, process_id: str) -> None:
     heartbeat.start()
 
     try:
-        from tasks.process_tasks import execute_process_task
-        asyncio.run(execute_process_task(process_id))
+        asyncio.run(_run_with_sigterm_handler(process_id))
+    except (SystemExit, KeyboardInterrupt, asyncio.CancelledError):
+        # Clean termination via SIGTERM revoke — _finalize_if_stopped handles MongoDB
+        pass
     except Exception as exc:
         heartbeat.stop()
         heartbeat.join(timeout=5)
@@ -81,7 +85,67 @@ def run_process_task(self: Task, process_id: str) -> None:
         heartbeat.stop()
         heartbeat.join(timeout=5)
     finally:
+        _finalize_if_stopped(process_id)
         _clear_runtime_metadata(process_id)
+
+
+async def _run_with_sigterm_handler(process_id: str) -> None:
+    """Run the process task with a SIGTERM handler that cancels all coroutines immediately."""
+    loop = asyncio.get_running_loop()
+
+    def _cancel_all() -> None:
+        for task in asyncio.all_tasks(loop):
+            if not task.done():
+                task.cancel()
+
+    loop.add_signal_handler(signal.SIGTERM, _cancel_all)
+    try:
+        from tasks.process_tasks import execute_process_task
+        await execute_process_task(process_id)
+    finally:
+        try:
+            loop.remove_signal_handler(signal.SIGTERM)
+        except Exception:
+            pass
+
+
+def _finalize_if_stopped(process_id: str) -> None:
+    """If process is still stop_requested after task ends, mark everything stopped."""
+    try:
+        with MongoClient(_MONGODB_URI) as client:
+            db = client[_MONGODB_DB]
+            proc = db[_COLLECTION].find_one({"process_id": process_id}, {"status": 1})
+            if not proc or str(proc.get("status") or "") != "stop_requested":
+                return
+            now = datetime.utcnow()
+            db[_DOMAIN_COLLECTION].update_many(
+                {"process_id": process_id, "status": {"$nin": ["completed", "failed", "stopped"]}},
+                {"$set": {"status": "stopped", "updated_at": now}},
+            )
+            pipeline = [
+                {"$match": {"process_id": process_id}},
+                {"$group": {"_id": "$status", "count": {"$sum": 1}}},
+            ]
+            counts = {doc["_id"]: doc["count"] for doc in db[_DOMAIN_COLLECTION].aggregate(pipeline)}
+            total = sum(counts.values())
+            db[_COLLECTION].update_one(
+                {"process_id": process_id},
+                {
+                    "$set": {
+                        "status": "stopped",
+                        "completed_at": now,
+                        "summary": {
+                            "total_domain_count": total,
+                            "processed_domain_count": total,
+                            "completed_domain_count": counts.get("completed", 0),
+                            "failed_domain_count": counts.get("failed", 0),
+                            "stopped_domain_count": counts.get("stopped", 0),
+                        },
+                    }
+                },
+            )
+    except Exception:
+        pass
 
 
 def _reset_to_queued(process_id: str, reason: str) -> None:

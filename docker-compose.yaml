@@ -160,7 +160,7 @@ services:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-admin}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-secret}
     volumes:
-      - mongo-data:/data/db
+      - ./mongo-data:/data/db
       - ./mongod.conf:/etc/mongod.conf:ro
     restart: unless-stopped
 

@@ -136,12 +136,15 @@ class JobProcessService:
             return {"process_id": process_id, "status": status, "message": f"Process is already {status}."}
         self._stop_requests.add(process_id)
         await self._mongodb_service.mark_process_stop_requested(process_id)
+
+        # Close browser — any in-flight page operation fails immediately
+        await self._close_process_browser(process)
+        # Revoke Celery task — SIGTERM cancels all coroutines right away
+        _revoke_process_task(process)
+
         process_with_domains = await self._mongodb_service.get_process_with_domains(process_id)
         items = list((process_with_domains or {}).get("items") or [])
         assignments = list((process_with_domains or {}).get("assignments") or [])
-
-        # Close the browser session immediately so any in-progress domain fails fast
-        await self._close_process_browser(process_with_domains)
 
         # Process never started — stop it immediately
         if status in {"queued", "acquiring_browser"} and not (process_with_domains or {}).get("started_at"):
@@ -241,6 +244,16 @@ class JobProcessService:
 
     def _is_stop_requested(self, process_id: str) -> bool:
         return process_id in self._stop_requests
+
+
+def _revoke_process_task(process: dict[str, Any]) -> None:
+    try:
+        from infrastructure.celery_app import celery_app
+        task_id = str((process.get("metadata") or {}).get("celery_task_id") or "").strip()
+        if task_id:
+            celery_app.control.revoke(task_id, terminate=True, signal="SIGTERM")
+    except Exception:
+        pass
 
 
 def build_domain_documents(inputs: list[UploadDomainInput]) -> list[dict[str, Any]]:

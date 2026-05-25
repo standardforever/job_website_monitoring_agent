@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from typing import Any, Callable
 
@@ -42,6 +43,7 @@ class ProcessExecutor:
         client = await self._mongodb_service.get_client(str(process.get("client_key") or ""))
         runtime_tokens = self._set_runtime_config(client, process)
         browser_runtime = None
+        agent_sessions = None
         try:
             domains, assignments = self._domains_and_assignments(process)
             self._log_started(process_id, domains, assignments)
@@ -63,10 +65,17 @@ class ProcessExecutor:
                 return await self._fail_startup(process_id, process, error)
             process = {**process, **running_process}
 
-            worker_results = await self._run_assignments(process_id, assignments, process, browser_runtime)
+            hydrated = self._hydrate_assignments(process, assignments)
+            agent_sessions = await self._browser_manager.create_all_agent_tabs(browser_runtime, len(hydrated))
+            if agent_sessions is None:
+                error = "Failed to create agent browser tabs"
+                return await self._fail_startup(process_id, process, error)
+
+            worker_results = await self._run_assignments(process_id, hydrated, agent_sessions)
             return await self._complete_process(process_id, domains, assignments, worker_results)
         finally:
             reset_openai_runtime_config(runtime_tokens)
+            await self._browser_manager.close_all_agent_tabs(agent_sessions)
             await self._browser_manager.close_process_session(browser_runtime)
 
     async def skipped_or_invalid_process(self, process_id: str) -> dict[str, Any]:
@@ -99,27 +108,23 @@ class ProcessExecutor:
         self,
         process_id: str,
         assignments: list[dict[str, Any]],
-        process: dict[str, Any],
-        browser_runtime: Any,
+        agent_sessions: list[Any],
     ) -> list[dict[str, Any]]:
-        import asyncio
         return await asyncio.gather(
             *[
-                self._run_assignment(process_id, assignment, browser_runtime)
-                for assignment in self._hydrate_assignments(process, assignments)
+                self._run_assignment(process_id, assignment, agent_sessions[i])
+                for i, assignment in enumerate(assignments)
             ]
         )
 
-    async def _run_assignment(self, process_id: str, assignment: dict[str, Any], browser_runtime: Any) -> dict[str, Any]:
+    async def _run_assignment(self, process_id: str, assignment: dict[str, Any], agent_session: Any) -> dict[str, Any]:
         try:
             return await self._worker.run(
                 {
                     "process_id": process_id,
                     "agent_index": assignment["agent_index"],
                     "assigned_domains": assignment["domains"],
-                    "session_id": browser_runtime.session_id,
-                    "cdp_url": browser_runtime.cdp_url,
-                    "shared_runtime": browser_runtime,
+                    "agent_session": agent_session,
                 }
             )
         except Exception as exc:
