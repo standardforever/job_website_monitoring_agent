@@ -52,6 +52,13 @@ class ProcessExecutor:
             if browser_runtime is None:
                 error = "Browser capacity is not available"
                 return await self._fail_startup(process_id, process, error)
+            await self._mongodb_service.update_process_upload(
+                process_id,
+                {
+                    "metadata.browser_session_id": browser_runtime.session_id,
+                    "metadata.browser_grid_url": browser_runtime.grid_url,
+                },
+            )
             running_process = await self._mongodb_service.mark_process_running(process_id)
             if running_process is None:
                 error = "Process changed state before browser acquisition completed"

@@ -133,8 +133,15 @@ class JobProcessService:
         status = str(process.get("status") or "")
         if status in {"completed", "partial_completed", "failed", "stopped"}:
             return {"process_id": process_id, "status": status, "message": f"Process is already {status}."}
+
         self._stop_requests.add(process_id)
         await self._mongodb_service.mark_process_stop_requested(process_id)
+
+        # Close browser session — any in-flight page operation fails immediately
+        await self._close_process_browser(process)
+        # Revoke the Celery task — SIGTERM cancels all coroutines right away
+        _revoke_process_task(process)
+
         process_with_domains = await self._mongodb_service.get_process_with_domains(process_id)
         items = list((process_with_domains or {}).get("items") or [])
         assignments = list((process_with_domains or {}).get("assignments") or [])
@@ -143,15 +150,27 @@ class JobProcessService:
         if status in {"queued", "acquiring_browser"} and not (process_with_domains or {}).get("started_at"):
             return await self._force_stop(process_id, items, assignments, "Queued process stopped before execution.")
 
-        # No active background task owns this process — it is orphaned (e.g. after an API restart)
-        if process_id not in self._active_processes:
+        # No Celery task running and not in this process — treat as orphaned
+        celery_task_id = str((process.get("metadata") or {}).get("celery_task_id") or "").strip()
+        if process_id not in self._active_processes and not celery_task_id:
             return await self._force_stop(process_id, items, assignments, "Process stopped (no active execution found).")
 
         return {
             "process_id": process_id,
             "status": "stop_requested",
-            "message": "Stop requested. Running work will stop after the current domain finishes.",
+            "message": "Stop requested. Worker will stop and clean up shortly.",
         }
+
+    async def _close_process_browser(self, process: dict[str, Any] | None) -> None:
+        from services.grid_session import close_session_via_http_async
+        metadata = (process or {}).get("metadata") or {}
+        session_id = metadata.get("browser_session_id")
+        grid_url = metadata.get("browser_grid_url")
+        if session_id and grid_url:
+            try:
+                await close_session_via_http_async(grid_url, session_id)
+            except Exception:
+                pass
 
     async def _force_stop(self, process_id: str, items: list, assignments: list, message: str) -> dict[str, Any]:
         domain_keys = [{"domain_key": item.get("domain_key"), "career_page_url": item.get("career_page_url")} for item in items]
@@ -220,6 +239,16 @@ class JobProcessService:
 
     def _is_stop_requested(self, process_id: str) -> bool:
         return process_id in self._stop_requests
+
+
+def _revoke_process_task(process: dict[str, Any]) -> None:
+    try:
+        from infrastructure.celery_app import celery_app
+        task_id = str((process.get("metadata") or {}).get("celery_task_id") or "").strip()
+        if task_id:
+            celery_app.control.revoke(task_id, terminate=True, signal="SIGTERM")
+    except Exception:
+        pass
 
 
 def build_domain_documents(inputs: list[UploadDomainInput]) -> list[dict[str, Any]]:
