@@ -126,7 +126,7 @@ class AgentWorker:
                 domain=domain,
                 browser_session=session,
                 agent_index=agent_index,
-                agent_tab={},
+                agent_tab={"handle": session.cdp_url, "agent_index": agent_index, "status": "ready"},
             ),
             timeout=timeout_seconds,
         )
