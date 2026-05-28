@@ -268,7 +268,7 @@ async def career_page_category_node(career_page_url: List[str], browser_session:
         nav_response = await navigate_to_url(
             browser_session.page if browser_session is not None else None,
             agent_index=agent_index,
-            tab_handle=agent_tab["handle"],
+            tab_handle=agent_tab.get("handle"),
             url=career_url,
             post_navigation_delay_ms=0,
         )
