@@ -180,7 +180,11 @@ def _listing_job_key(domain_key: str | None, page_url: str | None, job: Any) -> 
 
 def _process_is_rerun(process: dict[str, Any]) -> bool:
     metadata = dict(process.get("metadata") or {})
-    return bool(metadata.get("rerun_of_process_id") or metadata.get("workflow_mode") == "rerun")
+    if metadata.get("rerun_of_process_id") or metadata.get("workflow_mode") == "rerun":
+        return True
+    if process.get("history"):
+        return True
+    return any(item.get("previous_job_keys") for item in list(process.get("items") or []))
 
 
 def _append_role_row(
@@ -202,7 +206,7 @@ def _append_role_row(
     snapshot = dict(page.get("listing_job_snapshot") or {})
     listing_page_url = _listing_page_url(page) or None
     job_key = _listing_job_key(item.get("domain_key"), listing_page_url, job)
-    added_job_keys = set(snapshot.get("added_job_keys") or [])
+    added_job_keys = set(item.get("added_job_keys") or [])
     if new_only and job_key not in added_job_keys:
         return
 
@@ -244,12 +248,68 @@ def _append_role_row(
     rows.append(row)
 
 
+def _append_extracted_job_row(
+    rows: list[dict[str, Any]],
+    seen: set[tuple[str, str, str, str, str]],
+    *,
+    item: dict[str, Any],
+    job: dict[str, Any],
+    new_only: bool,
+) -> None:
+    job_key = str(job.get("job_key") or "").strip()
+    if new_only and job_key not in set(item.get("added_job_keys") or []):
+        return
+
+    title = _job_title(job)
+    job_url = _job_url(job)
+    if not title and not job_url:
+        return
+
+    marker = (
+        str(item.get("raw_url") or ""),
+        str(item.get("career_page_url") or ""),
+        str(job.get("listing_page_url") or ""),
+        str(job_url or ""),
+        str(title or ""),
+    )
+    if marker in seen:
+        return
+    seen.add(marker)
+    rows.append(
+        {
+            "company_url": item.get("raw_url"),
+            "domain_key": item.get("domain_key"),
+            "career_url": item.get("career_page_url"),
+            "listing_page_url": job.get("listing_page_url"),
+            "job_url": job_url,
+            "title": title,
+            "source": job.get("source") or "extracted_jobs",
+            "page_status": item.get("status"),
+            "snapshot_run_date": (item.get("completed_at") or item.get("updated_at")),
+            "snapshot_job_count": len(item.get("current_job_keys") or []),
+            "snapshot_added_count": len(item.get("added_job_keys") or []),
+            "snapshot_removed_count": len(item.get("removed_job_keys") or []),
+            "snapshot_unchanged_count": len(item.get("unchanged_job_keys") or []),
+            "job_change_status": "new" if new_only else "current",
+        }
+    )
+
+
 def build_process_roles_csv_rows(process: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str, str]] = set()
     new_only = _process_is_rerun(process)
     for item in list(process.get("items") or []):
         result_payload = dict(item.get("result_payload") or {})
+        extracted_jobs = list(result_payload.get("extracted_jobs") or [])
+        if extracted_jobs:
+            for job in extracted_jobs:
+                if isinstance(job, dict):
+                    _append_extracted_job_row(rows, seen, item=item, job=job, new_only=new_only)
+            continue
+        if new_only and not item.get("added_job_keys"):
+            continue
+
         career_page_result = dict(result_payload.get("career_page_result") or {})
         item_rows_before = len(rows)
         for page in list(career_page_result.get("career_pages_analysis") or []):
